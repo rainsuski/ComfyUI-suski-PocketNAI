@@ -2,8 +2,6 @@
 
 基于「槽位注入」的 ComfyUI 移动端极简控制器。PC 端把工作流里的任意输入控件绑定成槽位，移动端只负责填写这些槽位，然后调用 ComfyUI 原生队列执行。
 
-![移动端预览](docs/preview.png)
-
 ## 功能
 
 - PC 画布节点右键菜单：`suski 移动端槽位`
@@ -64,12 +62,12 @@ http://<PC 的局域网 IP>:8188/suski/
 
 ## 槽位类型
 
-| `type` | 来源 | 移动端控件 |
-| --- | --- | --- |
-| `prompt` / `negative` / `text` | 任意文本控件 | 多行提示词输入 |
-| `seed` / `slider` / `number` / `toggle` / `combo` | 任意参数控件 | 对应参数控件 |
-| `lm_loras` | `Lora Loader (LoraManager)` 的 `loras` 控件 | 已挂载 LoRA 托盘 |
-| `pv_tiles` | `PromptVaultSelector` 的 `selected_tiles_data` 控件 | 预设磁贴列表 |
+| `type`                                                    | 来源                                                    | 移动端控件       |
+| ----------------------------------------------------------- | ------------------------------------------------------- | ---------------- |
+| `prompt` / `negative` / `text`                        | 任意文本控件                                            | 多行提示词输入   |
+| `seed` / `slider` / `number` / `toggle` / `combo` | 任意参数控件                                            | 对应参数控件     |
+| `lm_loras`                                                | `Lora Loader (LoraManager)` 的 `loras` 控件         | 已挂载 LoRA 托盘 |
+| `pv_tiles`                                                | `PromptVaultSelector` 的 `selected_tiles_data` 控件 | 预设磁贴列表     |
 
 `lm_loras` 与 `pv_tiles` 都是对象数组，提交时会转换为节点真正读取的结构：
 
@@ -99,13 +97,13 @@ iframe 入口。
 
 LoRA 伴随文件嗅探规则（纯本地，无外网请求）：
 
-| 类型 | 查找顺序 |
-| --- | --- |
-| 封面 | `<stem>.preview.png` → `.preview.jpg` → `.preview.jpeg` → `.preview.webp` → `.png` → `.jpg` → `.jpeg` → `.webp` |
-| 元数据 | `<stem>.metadata.json` → `<stem>.civitai.info` → `<stem>.json` |
-| 触发词 | `trainedWords` / `trigger_words` / `activation_text`（顶层或 `civitai`、`modelVersion` 内） |
-| 推荐权重 | `preferredWeight` / `preferred_weight` / `recommended_weight` / `weight` / `usage_tips.strength` |
-| 底模 | `base_model` / `baseModel`（顶层或 `civitai`、`modelVersion`、`model` 内） |
+| 类型     | 查找顺序                                                                                                                               |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| 封面     | `<stem>.preview.png` → `.preview.jpg` → `.preview.jpeg` → `.preview.webp` → `.png` → `.jpg` → `.jpeg` → `.webp` |
+| 元数据   | `<stem>.metadata.json` → `<stem>.civitai.info` → `<stem>.json`                                                                 |
+| 触发词   | `trainedWords` / `trigger_words` / `activation_text`（顶层或 `civitai`、`modelVersion` 内）                                  |
+| 推荐权重 | `preferredWeight` / `preferred_weight` / `recommended_weight` / `weight` / `usage_tips.strength`                             |
+| 底模     | `base_model` / `baseModel`（顶层或 `civitai`、`modelVersion`、`model` 内）                                                   |
 
 `/suski/api/loras` 返回的 `name` 是相对 `models/loras` 的路径（去掉 `.safetensors` 等扩展名），
 与 Lora-Manager 在 `loras` 数组里保存的写法一致；`base_name` 只保留文件名，`folder` 用于展示目录。
@@ -133,20 +131,20 @@ LoRA 伴随文件嗅探规则（纯本地，无外网请求）：
 
 ## API
 
-| 路径 | 方法 | 说明 |
-| --- | --- | --- |
-| `/suski` | GET | 移动端入口 |
-| `/suski/api/config` | GET | 当前模板与 `suski_config` |
-| `/suski/api/integrations` | GET | 探测 Prompt-Vault 是否可用 |
-| `/suski/api/sync_template` | POST | 接收 `api_prompt` 与 `suski_config`，成功后落盘 |
-| `/suski/api/workflows` | GET | 列出已保存的工作流与当前活动项 |
-| `/suski/api/workflows/switch` | POST | 切换活动工作流（`{"id": "<id>"}`） |
-| `/suski/api/loras` | GET | 本地 LoRA 列表 + 伴随元数据（`?refresh=1` 跳过缓存） |
-| `/suski/api/lora_preview` | GET | 输出 LoRA 本地封面（`?name=<相对路径>`） |
-| `/suski/api/tags.csv` | GET | 输出当前词库文件 |
-| `/suski/api/apply_slots` | POST | 把移动端编辑写回模板、落盘并广播给 PC 画布 |
-| `/suski/api/execute` | POST | 注入槽位、校验并入队 |
-| `/suski/api/cancel` | POST | 停止生成（`{"prompt_id": "..."}`，中断执行并移出等待队列） |
+| 路径                            | 方法 | 说明                                                         |
+| ------------------------------- | ---- | ------------------------------------------------------------ |
+| `/suski`                      | GET  | 移动端入口                                                   |
+| `/suski/api/config`           | GET  | 当前模板与 `suski_config`                                  |
+| `/suski/api/integrations`     | GET  | 探测 Prompt-Vault 是否可用                                   |
+| `/suski/api/sync_template`    | POST | 接收 `api_prompt` 与 `suski_config`，成功后落盘          |
+| `/suski/api/workflows`        | GET  | 列出已保存的工作流与当前活动项                               |
+| `/suski/api/workflows/switch` | POST | 切换活动工作流（`{"id": "<id>"}`）                         |
+| `/suski/api/loras`            | GET  | 本地 LoRA 列表 + 伴随元数据（`?refresh=1` 跳过缓存）       |
+| `/suski/api/lora_preview`     | GET  | 输出 LoRA 本地封面（`?name=<相对路径>`）                   |
+| `/suski/api/tags.csv`         | GET  | 输出当前词库文件                                             |
+| `/suski/api/apply_slots`      | POST | 把移动端编辑写回模板、落盘并广播给 PC 画布                   |
+| `/suski/api/execute`          | POST | 注入槽位、校验并入队                                         |
+| `/suski/api/cancel`           | POST | 停止生成（`{"prompt_id": "..."}`，中断执行并移出等待队列） |
 
 `POST /suski/api/execute` 的负载：
 
