@@ -2,6 +2,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import posixpath
 import random
@@ -71,7 +72,12 @@ SLOT_TYPES = {
     "combo",
     "lm_loras",
     "pv_tiles",
+    "resolution",
 }
+RESOLUTION_ALIGNMENTS = (8, 16, 32, 64)
+RESOLUTION_CANVAS_LIMITS = (2048, 4096, 8192)
+RESOLUTION_MIN = 16
+RESOLUTION_MAX = 16384
 # 探测可选外部插件时使用的路由：插件没装时对应入口在移动端整体隐藏。
 INTEGRATION_ROUTES = {
     "prompt_vault": "/prompt_vault/api/library",
@@ -188,6 +194,169 @@ def _coerce_tile_entries(value) -> str:
     return json.dumps(tiles, ensure_ascii=False)
 
 
+def _resolution_int(value, label: str) -> int:
+    if isinstance(value, bool) or value is None or value == "":
+        raise ValueError(f"{label} 必须是整数")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{label} 必须是整数") from None
+    if not math.isfinite(number):
+        raise ValueError(f"{label} 必须是整数")
+    return int(round(number))
+
+
+def _resolution_alignment(value) -> int:
+    try:
+        alignment = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 8
+    return alignment if alignment in RESOLUTION_ALIGNMENTS else 8
+
+
+def _align_resolution(value: int, alignment: int) -> int:
+    minimum = math.ceil(RESOLUTION_MIN / alignment) * alignment
+    clamped = min(RESOLUTION_MAX, max(minimum, value))
+    # Aaalice 前端用 Math.round（.5 向上），Python 的 round 是银行家舍入；
+    # 这里显式保持与画布一致，避免 20/8 这类边界值在两端算出不同宽度。
+    aligned = math.floor(clamped / alignment + 0.5) * alignment
+    return int(min(RESOLUTION_MAX, max(minimum, aligned)))
+
+
+def _normalize_resolution_state(value) -> dict:
+    """把移动端/Aaalice 的分辨率状态收敛成执行与回写都安全的形状。
+
+    执行阶段只读取 width/height，但配置里保留 alignment/canvasMax/presetId，
+    这样手机改完写回 PC 时画布框选、对齐和预设高亮都不会丢失。
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            raise ValueError("分辨率数据必须是 JSON 对象") from None
+    if not isinstance(value, dict):
+        raise ValueError("分辨率数据必须是对象")
+
+    alignment = _resolution_alignment(value.get("alignment"))
+    width = _align_resolution(_resolution_int(value.get("width"), "宽度"), alignment)
+    height = _align_resolution(_resolution_int(value.get("height"), "高度"), alignment)
+    minimum_canvas = next(
+        (limit for limit in RESOLUTION_CANVAS_LIMITS if max(width, height) <= limit),
+        RESOLUTION_CANVAS_LIMITS[-1],
+    )
+    try:
+        requested_canvas = int(value.get("canvasMax"))
+    except (TypeError, ValueError, OverflowError):
+        requested_canvas = RESOLUTION_CANVAS_LIMITS[0]
+    if requested_canvas not in RESOLUTION_CANVAS_LIMITS:
+        requested_canvas = RESOLUTION_CANVAS_LIMITS[0]
+    canvas_max = max(minimum_canvas, requested_canvas)
+    preset_id = value.get("presetId")
+    if not isinstance(preset_id, str) or not preset_id.strip():
+        preset_id = None
+    else:
+        preset_id = preset_id.strip()
+
+    return {
+        "version": 1,
+        "width": width,
+        "height": height,
+        "alignment": alignment,
+        "canvasMax": canvas_max,
+        "presetId": preset_id,
+    }
+
+
+def _coerce_resolution_json(value) -> str:
+    state = _normalize_resolution_state(value)
+    return json.dumps(
+        {"version": 1, "width": state["width"], "height": state["height"]},
+        separators=(",", ":"),
+    )
+
+
+def _resolution_state_candidate(value):
+    """识别一个值是否像 ResolutionPreset 的状态（含旧版 text 降级后的字符串）。"""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, dict):
+        return None
+    if value.get("version") != 1 or "width" not in value or "height" not in value:
+        return None
+    try:
+        _resolution_int(value.get("width"), "宽度")
+        _resolution_int(value.get("height"), "高度")
+    except ValueError:
+        return None
+    return value
+
+
+def _clean_resolution_presets(value) -> list:
+    if not isinstance(value, list):
+        return []
+    presets = []
+    seen = set()
+    for raw in value[:128]:
+        if not isinstance(raw, dict):
+            continue
+        preset_id = str(raw.get("id") or "").strip()
+        if not preset_id or preset_id in seen:
+            continue
+        try:
+            width = _resolution_int(raw.get("width"), "宽度")
+            height = _resolution_int(raw.get("height"), "高度")
+        except ValueError:
+            continue
+        if not (RESOLUTION_MIN <= width <= RESOLUTION_MAX):
+            continue
+        if not (RESOLUTION_MIN <= height <= RESOLUTION_MAX):
+            continue
+        group = str(raw.get("group") or "square")
+        if group not in {"square", "portrait", "landscape", "personal"}:
+            group = "square"
+        seen.add(preset_id)
+        presets.append(
+            {
+                "id": preset_id[:120],
+                "name": str(raw.get("name") or f"{width}×{height}")[:48],
+                "width": width,
+                "height": height,
+                "alignment": _resolution_alignment(raw.get("alignment")),
+                "group": group,
+            }
+        )
+    return presets
+
+
+def _clean_resolution_choices(value, allowed, default) -> list:
+    if not isinstance(value, list):
+        return list(default)
+    cleaned = set()
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            continue
+        if not math.isfinite(item):
+            continue
+        number = int(item)
+        if number in allowed:
+            cleaned.add(number)
+    return sorted(cleaned) or list(default)
+
+
+def _default_resolution_state() -> dict:
+    return {
+        "version": 1,
+        "width": 1024,
+        "height": 1024,
+        "alignment": 8,
+        "canvasMax": 2048,
+        "presetId": None,
+    }
+
+
 def _clean_targets(value):
     if not isinstance(value, list):
         return None
@@ -225,6 +394,11 @@ def _plain_slot_value(slot: dict, value):
             return json.loads(value)
         except (json.JSONDecodeError, TypeError):
             return []
+    if slot["type"] == "resolution":
+        try:
+            return _normalize_resolution_state(value)
+        except ValueError:
+            return _default_resolution_state()
     return value
 
 
@@ -245,6 +419,11 @@ def _clean_slot(raw: dict) -> dict:
         raise ValueError("每个槽位都必须包含 node_id 与 field")
 
     slot_type = str(raw.get("type", "text"))
+    # 旧版本后端不认识 resolution，会把槽位写成 text；只要落点仍是
+    # resolution_json 且默认值像分辨率状态，就在加载时自动纠正回来。
+    default_candidate = _resolution_state_candidate(raw.get("default_val"))
+    if slot_type != "resolution" and field == "resolution_json" and default_candidate is not None:
+        slot_type = "resolution"
     if slot_type not in SLOT_TYPES:
         slot_type = "text"
 
@@ -264,6 +443,29 @@ def _clean_slot(raw: dict) -> dict:
             slot[key] = raw[key]
     if isinstance(raw.get("options"), list):
         slot["options"] = copy.deepcopy(raw["options"])
+    if slot_type == "resolution":
+        default_source = default_candidate if default_candidate is not None else raw.get("default_val")
+        try:
+            slot["default_val"] = _normalize_resolution_state(default_source)
+        except ValueError:
+            slot["default_val"] = _default_resolution_state()
+        # 预设元数据可能因为旧版 text 降级被塞进 default_val，优先从中恢复。
+        presets_value = raw.get("presets")
+        if not isinstance(presets_value, list) and default_candidate is not None:
+            presets_value = default_candidate.get("presets")
+        alignments_value = raw.get("alignments")
+        if not isinstance(alignments_value, list) and default_candidate is not None:
+            alignments_value = default_candidate.get("alignments")
+        limits_value = raw.get("canvas_limits")
+        if not isinstance(limits_value, list) and default_candidate is not None:
+            limits_value = default_candidate.get("canvas_limits")
+        slot["presets"] = _clean_resolution_presets(presets_value)
+        slot["alignments"] = _clean_resolution_choices(
+            alignments_value, RESOLUTION_ALIGNMENTS, RESOLUTION_ALIGNMENTS
+        )
+        slot["canvas_limits"] = _clean_resolution_choices(
+            limits_value, RESOLUTION_CANVAS_LIMITS, RESOLUTION_CANVAS_LIMITS
+        )
     targets = _clean_targets(raw.get("targets"))
     if targets:
         slot["targets"] = targets
@@ -315,6 +517,9 @@ def _coerce_value(slot: dict, value):
 
     if slot_type == "pv_tiles":
         return _coerce_tile_entries(value)
+
+    if slot_type == "resolution":
+        return _coerce_resolution_json(value)
 
     if slot_type in {"seed", "slider", "number"}:
         if isinstance(value, bool) or value is None or value == "":
@@ -412,11 +617,23 @@ def _inject_slots(prompt: dict, config: dict, slots_data: dict, randomize_seed: 
                     skipped.append(f"{slot['label']}（节点 {target_node_id} 不在当前模板）")
                 continue
             inputs = node.get("inputs")
-            if not isinstance(inputs, dict) or target_field not in inputs:
+            # ResolutionPreset 通过 accept_all_inputs 接收 resolution_json，
+            # 该键由前端 graphToPrompt 钩子动态补上；旧模板里节点可能只有
+            # 空 inputs，此时允许直接创建这个输入，避免槽位被误判为失效。
+            if not isinstance(inputs, dict) and slot["type"] == "resolution":
+                inputs = {}
+                node["inputs"] = inputs
+            if not isinstance(inputs, dict):
+                if supplied:
+                    skipped.append(f"{slot['label']}（节点 {target_node_id} 缺少 inputs）")
+                continue
+            if target_field not in inputs and not (
+                slot["type"] == "resolution" and target_field == "resolution_json"
+            ):
                 if supplied:
                     skipped.append(f"{slot['label']}（节点 {target_node_id} 缺少 {target_field}）")
                 continue
-            if supplied and _is_link(inputs[target_field]):
+            if supplied and target_field in inputs and _is_link(inputs[target_field]):
                 skipped.append(f"{slot['label']}（{target_field} 已被连线）")
                 continue
             usable.append((inputs, target_field))

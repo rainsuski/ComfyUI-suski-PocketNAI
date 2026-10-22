@@ -39,6 +39,16 @@ import { fetchTags, readTagCache, writeTagCache } from "./tags.js";
 const LAST_IMAGE_KEY = "suski-pna-last-image";
 const PROMPT_TYPES = new Set(["prompt", "negative"]);
 const LIST_TYPES = new Set(["lm_loras", "pv_tiles"]);
+const RESOLUTION_ALIGNMENTS = [8, 16, 32, 64];
+const RESOLUTION_CANVAS_LIMITS = [2048, 4096, 8192];
+const RESOLUTION_MIN = 16;
+const RESOLUTION_MAX = 16384;
+const RESOLUTION_GROUPS = [
+  ["square", "方形"],
+  ["portrait", "竖图"],
+  ["landscape", "横图"],
+  ["personal", "我的预设"],
+];
 const GENERIC_LABELS = new Set(["值", "value", "文本", "text", "字符串", "string"]);
 const WRITE_DELAY = 450;
 
@@ -93,6 +103,8 @@ let unmounted = false;
 let toastTimer = null;
 let run = null;
 let installPrompt = null;
+let resolutionPresetCache = null;
+let resolutionPresetLoad = null;
 
 const slots = computed(() => state.config?.slots || []);
 const promptSlots = computed(() => slots.value.filter((slot) => PROMPT_TYPES.has(slot.type)));
@@ -145,11 +157,193 @@ function elementId(slot) {
   return `slot-${String(slot.node_id).replaceAll(/[^a-zA-Z0-9_-]/g, "-")}-${String(slot.field).replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
+function alignResolution(value, alignment) {
+  const unit = RESOLUTION_ALIGNMENTS.includes(Number(alignment)) ? Number(alignment) : 8;
+  const minimum = Math.ceil(RESOLUTION_MIN / unit) * unit;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return minimum;
+  const clamped = Math.min(RESOLUTION_MAX, Math.max(minimum, Math.round(numeric)));
+  return Math.min(RESOLUTION_MAX, Math.max(minimum, Math.round(clamped / unit) * unit));
+}
+
+function resolutionPresetMatches(preset, width, height, alignment) {
+  return Number(preset?.width) === width
+    && Number(preset?.height) === height
+    && (preset?.group !== "personal" || Number(preset?.alignment) === alignment);
+}
+
+// 兼容旧版后端：它不认识 resolution 类型，会把槽位降级成 text，并把
+// presets/alignments 这类附加字段丢掉（PC 钩子会把它们塞进 default_val）。
+function resolutionMetadataSource(value) {
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== "object") return null;
+  if (value.version !== 1) return null;
+  if (!Number.isFinite(Number(value.width)) || !Number.isFinite(Number(value.height))) return null;
+  return value;
+}
+
+function prepareSlot(slot) {
+  if (!slot || slot.type === "resolution" || slot.field !== "resolution_json") return;
+  const source = resolutionMetadataSource(slot.default_val);
+  if (!source) return;
+  slot.type = "resolution";
+  slot._resolutionLegacy = true;
+  if (!Array.isArray(slot.presets) && Array.isArray(source.presets)) slot.presets = source.presets;
+  if (!Array.isArray(slot.alignments) && Array.isArray(source.alignments)) slot.alignments = source.alignments;
+  if (!Array.isArray(slot.canvas_limits) && Array.isArray(source.canvas_limits)) {
+    slot.canvas_limits = source.canvas_limits;
+  }
+}
+
+function outgoingSlotValue(slot, value) {
+  if (!slot?._resolutionLegacy) return value;
+  const state = normalizeResolution(slot, value);
+  // 旧后端按 text 处理，只把字符串原样写进 resolution_json；附带元数据
+  // 让下一次加载仍能恢复预设列表，Aaalice 本身只读取 width/height。
+  return JSON.stringify({
+    version: 1,
+    width: state.width,
+    height: state.height,
+    alignment: state.alignment,
+    canvasMax: state.canvasMax,
+    presetId: state.presetId,
+    presets: Array.isArray(slot.presets) ? slot.presets : [],
+    alignments: Array.isArray(slot.alignments) ? slot.alignments : RESOLUTION_ALIGNMENTS,
+    canvas_limits: Array.isArray(slot.canvas_limits) ? slot.canvas_limits : RESOLUTION_CANVAS_LIMITS,
+  });
+}
+
+function normalizeResolutionPresets(value, defaultGroup) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const presets = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") continue;
+    const id = String(raw.id || "").trim();
+    const name = String(raw.name || "").trim();
+    if (!id || !name || seen.has(id)) continue;
+    const alignment = RESOLUTION_ALIGNMENTS.includes(Number(raw.alignment))
+      ? Number(raw.alignment)
+      : 8;
+    const width = alignResolution(raw.width, alignment);
+    const height = alignResolution(raw.height, alignment);
+    if (width < RESOLUTION_MIN || height < RESOLUTION_MIN) continue;
+    const group = ["square", "portrait", "landscape", "personal"].includes(raw.group)
+      ? raw.group
+      : defaultGroup;
+    seen.add(id);
+    presets.push({ id, name: name.slice(0, 48), width, height, alignment, group });
+  }
+  return presets;
+}
+
+// 预设列表是 Aaalice 前端常量 + 个人预设接口，正常情况下由 PC 随模板下发。
+// 旧后端会丢掉这些附加字段，这里直接在同源下读取 Aaalice 的模型模块与接口，
+// 让手机端无需等 PC 再同步一次也能拿到完整预设。
+async function loadBuiltinResolutionPresets() {
+  try {
+    const response = await fetch("/extensions", { cache: "no-store" });
+    if (!response.ok) return [];
+    const files = await response.json();
+    const modulePath = Array.isArray(files)
+      ? files.find((file) => typeof file === "string" && file.endsWith("/lib/resolution_preset_model.js"))
+      : null;
+    if (!modulePath) return [];
+    const model = await import(/* @vite-ignore */ modulePath);
+    return normalizeResolutionPresets(model.BUILTIN_PRESETS, "square");
+  } catch {
+    return [];
+  }
+}
+
+async function loadPersonalResolutionPresets() {
+  try {
+    const response = await fetch("/aaalice/resolution-presets", { cache: "no-store" });
+    if (!response.ok) return [];
+    const data = await response.json();
+    return normalizeResolutionPresets(data?.presets, "personal");
+  } catch {
+    return [];
+  }
+}
+
+function resolutionPresetsCatalog() {
+  if (resolutionPresetCache?.length) return Promise.resolve(resolutionPresetCache);
+  if (resolutionPresetLoad) return resolutionPresetLoad;
+  resolutionPresetLoad = Promise.all([
+    loadBuiltinResolutionPresets(),
+    loadPersonalResolutionPresets(),
+  ]).then(([builtin, personal]) => {
+    const seen = new Set();
+    const presets = [];
+    for (const preset of [...builtin, ...personal]) {
+      if (seen.has(preset.id)) continue;
+      seen.add(preset.id);
+      presets.push(preset);
+    }
+    if (presets.length) resolutionPresetCache = presets;
+    return presets;
+  }).catch(() => []).finally(() => {
+    resolutionPresetLoad = null;
+  });
+  return resolutionPresetLoad;
+}
+
+async function hydrateResolutionPresets(key) {
+  const slot = slotByKey(key);
+  if (!slot || slot.type !== "resolution") return;
+  if (Array.isArray(slot.presets) && slot.presets.length) return;
+  const presets = await resolutionPresetsCatalog();
+  if (!presets.length) return;
+  const current = slotByKey(key);
+  if (!current || (Array.isArray(current.presets) && current.presets.length)) return;
+  current.presets = presets;
+}
+
+
+// 与 PC 端 Aaalice 的 normalizeResolutionState 保持同一套收敛规则：
+// 宽高按对齐值取整、画布上限自动容纳最大边、能匹配预设时自动回填 presetId。
+function normalizeResolution(slot, value) {
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      value = null;
+    }
+  }
+  const raw = value && typeof value === "object" ? value : {};
+  const alignments = Array.isArray(slot?.alignments) && slot.alignments.length
+    ? slot.alignments.map(Number)
+    : RESOLUTION_ALIGNMENTS;
+  const limits = Array.isArray(slot?.canvas_limits) && slot.canvas_limits.length
+    ? slot.canvas_limits.map(Number)
+    : RESOLUTION_CANVAS_LIMITS;
+  const alignment = alignments.includes(Number(raw.alignment)) ? Number(raw.alignment) : 8;
+  const width = alignResolution(raw.width ?? 1024, alignment);
+  const height = alignResolution(raw.height ?? 1024, alignment);
+  const minimumCanvas = limits.find((limit) => Math.max(width, height) <= limit) || limits[limits.length - 1];
+  const requested = limits.includes(Number(raw.canvasMax)) ? Number(raw.canvasMax) : 2048;
+  const canvasMax = Math.max(minimumCanvas, requested);
+  const presets = Array.isArray(slot?.presets) ? slot.presets : [];
+  const hinted = presets.find(
+    (preset) => preset.id === raw.presetId && resolutionPresetMatches(preset, width, height, alignment),
+  );
+  const matched = hinted || presets.find((preset) => resolutionPresetMatches(preset, width, height, alignment));
+  return { version: 1, width, height, alignment, canvasMax, presetId: matched?.id ?? null };
+}
+
 function defaultValue(slot) {
   let value = slot.default_val;
   if (slot.type === "toggle") return Boolean(value);
   if (slot.type === "lm_loras") return readLoraList(slot);
   if (slot.type === "pv_tiles") return readTileList(slot);
+  if (slot.type === "resolution") return normalizeResolution(slot, value);
   if (["seed", "slider", "number"].includes(slot.type)) return value ?? 0;
   if (slot.type === "combo" && Array.isArray(slot.options) && slot.options.length) {
     const match = slot.options.find((option) => String(option) === String(value));
@@ -266,6 +460,7 @@ function applyConfig(config, { reset = false } = {}) {
 
   const keys = new Set();
   for (const slot of config.slots || []) {
+    prepareSlot(slot);
     const key = slotKey(slot);
     keys.add(key);
     const incoming = defaultValue(slot);
@@ -310,6 +505,11 @@ function applyConfig(config, { reset = false } = {}) {
   state.config = config;
   state.hasTemplate = true;
   document.title = `${config.display_title || "PocketNAI"} · PocketNAI`;
+  for (const slot of config.slots || []) {
+    if (slot.type === "resolution" && (!Array.isArray(slot.presets) || !slot.presets.length)) {
+      void hydrateResolutionPresets(slotKey(slot));
+    }
+  }
 }
 
 function clearTemplate() {
@@ -337,6 +537,14 @@ function setValue(key, value) {
 
 function isWritableValue(slot, value) {
   if (slot.type === "lm_loras" || slot.type === "pv_tiles") return Array.isArray(value);
+  if (slot.type === "resolution") {
+    return Boolean(
+      value
+      && typeof value === "object"
+      && Number.isFinite(Number(value.width))
+      && Number.isFinite(Number(value.height)),
+    );
+  }
   if (["seed", "slider", "number"].includes(slot.type)) {
     if (value === "" || value === null || value === undefined) return false;
     return Number.isFinite(Number(value));
@@ -383,7 +591,7 @@ async function flushSlotWrite(key) {
         if (!slot) break;
         const value = values[key];
         if (!isWritableValue(slot, value)) break;
-        const result = await applySlots({ [slot.node_id]: { [slot.field]: value } });
+        const result = await applySlots({ [slot.node_id]: { [slot.field]: outgoingSlotValue(slot, value) } });
         if (result?.updated_at) state.updatedAt = result.updated_at;
       } while (writePending.has(key));
     } catch (error) {
@@ -443,6 +651,60 @@ function onCombo(slot, event) {
   setValue(slotKey(slot), option !== undefined ? option : raw);
 }
 
+function resolutionValue(slot) {
+  return normalizeResolution(slot, values[slotKey(slot)]);
+}
+
+function setResolutionValue(slot, value) {
+  const normalized = normalizeResolution(slot, value);
+  const key = slotKey(slot);
+  if (valuesEqual(values[key], normalized)) return;
+  setValue(key, normalized);
+}
+
+function resolutionGroups(slot) {
+  const presets = Array.isArray(slot.presets) ? slot.presets : [];
+  return RESOLUTION_GROUPS
+    .map(([key, label]) => ({ key, label, items: presets.filter((preset) => preset.group === key) }))
+    .filter((group) => group.items.length);
+}
+
+function onResolutionPreset(slot, event) {
+  const presetId = event.target.value;
+  if (presetId === "custom") return;
+  const preset = (slot.presets || []).find((item) => item.id === presetId);
+  if (!preset) return;
+  const state = resolutionValue(slot);
+  const presetAlignment = RESOLUTION_ALIGNMENTS.includes(Number(preset.alignment))
+    ? Number(preset.alignment)
+    : 8;
+  const currentFits = Number(preset.width) % state.alignment === 0
+    && Number(preset.height) % state.alignment === 0;
+  const alignment = preset.group === "personal" || !currentFits ? presetAlignment : state.alignment;
+  setResolutionValue(slot, {
+    version: 1,
+    width: alignResolution(preset.width, alignment),
+    height: alignResolution(preset.height, alignment),
+    alignment,
+    canvasMax: state.canvasMax,
+    presetId: preset.id,
+  });
+}
+
+function onResolutionSize(slot, dimension, event) {
+  const parsed = Number.parseInt(event.target.value, 10);
+  if (!Number.isFinite(parsed)) {
+    event.target.value = String(resolutionValue(slot)[dimension]);
+    return;
+  }
+  const normalized = normalizeResolution(slot, {
+    ...resolutionValue(slot),
+    [dimension]: parsed,
+  });
+  setResolutionValue(slot, normalized);
+  event.target.value = String(normalized[dimension]);
+}
+
 function randomizeSeed(slot) {
   setValue(slotKey(slot), randomSeed());
 }
@@ -471,6 +733,7 @@ function typeLabel(type) {
       combo: "选项",
       lm_loras: "LoRA",
       pv_tiles: "磁贴",
+      resolution: "分辨率",
     }[type] || "参数"
   );
 }
@@ -519,6 +782,8 @@ function collectSlots() {
       }));
     } else if (slot.type === "pv_tiles") {
       value = Array.isArray(value) ? value : [];
+    } else if (slot.type === "resolution") {
+      value = normalizeResolution(slot, value);
     } else if (["seed", "slider", "number"].includes(slot.type)) {
       const parsed = slot.value_kind === "float" ? Number.parseFloat(value) : Number.parseInt(value, 10);
       value = Number.isFinite(parsed) ? parsed : defaultValue(slot);
@@ -528,7 +793,7 @@ function collectSlots() {
       value = String(value ?? "");
     }
     data[slot.node_id] = data[slot.node_id] || {};
-    data[slot.node_id][slot.field] = value;
+    data[slot.node_id][slot.field] = outgoingSlotValue(slot, value);
   }
   return data;
 }
@@ -1700,6 +1965,56 @@ onBeforeUnmount(() => {
                   <span class="switch-track"></span>
                 </label>
               </div>
+
+              <template v-else-if="slot.type === 'resolution'">
+                <select
+                  :id="elementId(slot)"
+                  class="combo-input"
+                  :value="resolutionValue(slot).presetId || 'custom'"
+                  @change="onResolutionPreset(slot, $event)"
+                >
+                  <optgroup v-for="group in resolutionGroups(slot)" :key="group.key" :label="group.label">
+                    <option v-for="preset in group.items" :key="preset.id" :value="preset.id">
+                      {{ preset.name }}
+                    </option>
+                  </optgroup>
+                  <option value="custom">自定义</option>
+                </select>
+                <div class="resolution-size">
+                  <label class="resolution-size-field">
+                    <span aria-hidden="true">W</span>
+                    <input
+                      class="number-input"
+                      type="number"
+                      inputmode="numeric"
+                      :min="RESOLUTION_MIN"
+                      :max="RESOLUTION_MAX"
+                      :step="resolutionValue(slot).alignment"
+                      :value="resolutionValue(slot).width"
+                      aria-label="宽度"
+                      @change="onResolutionSize(slot, 'width', $event)"
+                    />
+                  </label>
+                  <span class="resolution-size-times" aria-hidden="true">×</span>
+                  <label class="resolution-size-field">
+                    <span aria-hidden="true">H</span>
+                    <input
+                      class="number-input"
+                      type="number"
+                      inputmode="numeric"
+                      :min="RESOLUTION_MIN"
+                      :max="RESOLUTION_MAX"
+                      :step="resolutionValue(slot).alignment"
+                      :value="resolutionValue(slot).height"
+                      aria-label="高度"
+                      @change="onResolutionSize(slot, 'height', $event)"
+                    />
+                  </label>
+                </div>
+                <p class="param-hint">
+                  宽高按 {{ resolutionValue(slot).alignment }} px 对齐，匹配预设时会自动回填。
+                </p>
+              </template>
 
               <select
                 v-else-if="slot.type === 'combo'"

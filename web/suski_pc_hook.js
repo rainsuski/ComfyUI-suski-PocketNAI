@@ -11,6 +11,16 @@ const LORA_NODE_CLASS = "Lora Loader (LoraManager)";
 const LORA_FIELD = "loras";
 const VAULT_NODE_CLASS = "PromptVaultSelector";
 const VAULT_FIELD = "selected_tiles_data";
+// Aaalice-Nodes 的 ResolutionPreset 没有原生输入控件：预设、宽高与画布上限
+// 都存在 node.properties 里，执行前由扩展把 {version,width,height} 写成
+// API Prompt 的 resolution_json。槽位因此也以该输入名为落点。
+const RESOLUTION_NODE_CLASS = "ResolutionPreset";
+const RESOLUTION_FIELD = "resolution_json";
+const RESOLUTION_PROPERTY = "resolutionPresetState";
+const RESOLUTION_ALIGNMENTS = Object.freeze([8, 16, 32, 64]);
+const RESOLUTION_CANVAS_LIMITS = Object.freeze([2048, 4096, 8192]);
+const RESOLUTION_MIN = 16;
+const RESOLUTION_MAX = 16384;
 
 let nativeGraphToPrompt = null;
 let nativeQueuePrompt = null;
@@ -61,11 +71,164 @@ function nodeById(nodeId) {
 }
 
 function nodeWidget(node, field) {
+  if (field === RESOLUTION_FIELD && isResolutionNode(node)) return resolutionWidget(node);
   return (node?.widgets || []).find((widget) => widget.name === field) || null;
 }
 
 function nodeClass(node) {
   return node?.comfyClass || node?.type || "";
+}
+
+function isResolutionNode(node) {
+  const classes = [
+    node?.comfyClass,
+    node?.type,
+    node?.constructor?.comfyClass,
+    node?.constructor?.nodeData?.name,
+  ];
+  return classes.includes(RESOLUTION_NODE_CLASS);
+}
+
+function isResolutionWidget(node, widget) {
+  return isResolutionNode(node) && widget?.name === RESOLUTION_FIELD;
+}
+
+function alignResolutionDimension(value, alignment) {
+  const unit = RESOLUTION_ALIGNMENTS.includes(Number(alignment)) ? Number(alignment) : 8;
+  const minimum = Math.ceil(RESOLUTION_MIN / unit) * unit;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return minimum;
+  const clamped = Math.min(RESOLUTION_MAX, Math.max(minimum, Math.round(numeric)));
+  return Math.min(RESOLUTION_MAX, Math.max(minimum, Math.round(clamped / unit) * unit));
+}
+
+function resolutionPresetMatches(preset, width, height, alignment) {
+  return Number(preset?.width) === width
+    && Number(preset?.height) === height
+    && (preset?.group !== "personal" || Number(preset?.alignment) === alignment);
+}
+
+function resolutionPresets(node) {
+  let raw = [];
+  try {
+    raw = node?._aaaliceResolutionControl?.getPresets?.() ?? [];
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const presets = [];
+  for (const preset of raw) {
+    if (!preset || typeof preset !== "object") continue;
+    const id = String(preset.id || "").trim();
+    const width = Number(preset.width);
+    const height = Number(preset.height);
+    if (!id || seen.has(id)) continue;
+    if (!Number.isInteger(width) || !Number.isInteger(height)) continue;
+    if (width < RESOLUTION_MIN || height < RESOLUTION_MIN) continue;
+    if (width > RESOLUTION_MAX || height > RESOLUTION_MAX) continue;
+    seen.add(id);
+    presets.push({
+      id,
+      name: String(preset.name || `${width}×${height}`).slice(0, 48),
+      width,
+      height,
+      alignment: RESOLUTION_ALIGNMENTS.includes(Number(preset.alignment)) ? Number(preset.alignment) : 8,
+      group: ["square", "portrait", "landscape", "personal"].includes(preset.group)
+        ? String(preset.group)
+        : "square",
+    });
+  }
+  return presets;
+}
+
+function resolutionAlignments(node) {
+  let raw = [];
+  try {
+    raw = node?._aaaliceResolutionControl?.getAlignments?.() ?? [];
+  } catch {
+    return [...RESOLUTION_ALIGNMENTS];
+  }
+  const values = [...new Set(
+    (Array.isArray(raw) ? raw : [])
+      .map((value) => Number(value))
+      .filter((value) => RESOLUTION_ALIGNMENTS.includes(value)),
+  )].sort((left, right) => left - right);
+  return values.length ? values : [...RESOLUTION_ALIGNMENTS];
+}
+
+function resolutionCanvasLimits(node) {
+  let raw = [];
+  try {
+    raw = node?._aaaliceResolutionControl?.getCanvasLimits?.() ?? [];
+  } catch {
+    return [...RESOLUTION_CANVAS_LIMITS];
+  }
+  const values = [...new Set(
+    (Array.isArray(raw) ? raw : [])
+      .map((value) => Number(value))
+      .filter((value) => RESOLUTION_CANVAS_LIMITS.includes(value)),
+  )].sort((left, right) => left - right);
+  return values.length ? values : [...RESOLUTION_CANVAS_LIMITS];
+}
+
+// 与 Aaalice 的 normalizeResolutionState 保持同样的收敛规则；不依赖扩展内部
+// 模块，Aaalice 尚未加载时也能从 properties 里读到上次保存的状态。
+function normalizeResolutionState(raw, presets, alignments, limits) {
+  if (!raw || typeof raw !== "object") return null;
+  const allowedAlignments = alignments?.length ? alignments : RESOLUTION_ALIGNMENTS;
+  const allowedLimits = limits?.length ? limits : RESOLUTION_CANVAS_LIMITS;
+  const alignment = allowedAlignments.includes(Number(raw.alignment)) ? Number(raw.alignment) : 8;
+  const width = alignResolutionDimension(raw.width ?? 1024, alignment);
+  const height = alignResolutionDimension(raw.height ?? 1024, alignment);
+  const minimumCanvas = allowedLimits.find((limit) => Math.max(width, height) <= limit) || allowedLimits.at(-1);
+  const requested = allowedLimits.includes(Number(raw.canvasMax)) ? Number(raw.canvasMax) : 2048;
+  const canvasMax = Math.max(minimumCanvas, requested);
+  const list = Array.isArray(presets) ? presets : [];
+  const hinted = list.find((preset) => preset.id === raw.presetId && resolutionPresetMatches(preset, width, height, alignment));
+  const matched = hinted || list.find((preset) => resolutionPresetMatches(preset, width, height, alignment));
+  return { version: 1, width, height, alignment, canvasMax, presetId: matched?.id || null };
+}
+
+function resolutionState(node, presets = resolutionPresets(node)) {
+  let raw;
+  try {
+    raw = node?._aaaliceResolutionControl?.getValue?.();
+  } catch {
+    raw = null;
+  }
+  if (!raw || typeof raw !== "object") raw = node?.properties?.[RESOLUTION_PROPERTY];
+  return normalizeResolutionState(
+    raw,
+    presets,
+    resolutionAlignments(node),
+    resolutionCanvasLimits(node),
+  );
+}
+
+function resolutionPayload(state) {
+  return { version: 1, width: state.width, height: state.height };
+}
+
+// 给没有 LiteGraph 控件的节点造一个只读视图，槽位选择、序列化与标签都能复用
+// 现有逻辑；真正写入时走 Aaalice 的 _aaaliceResolutionControl.setValue。
+function resolutionWidget(node) {
+  const state = resolutionState(node);
+  if (!state) return null;
+  return { name: RESOLUTION_FIELD, type: "resolution", value: state, options: { serialize: false } };
+}
+
+// 老版本后端不认识 resolution 类型，会把槽位降级成 text 并丢掉附加字段。
+// 把预设元数据同时塞进 default_val，降级后手机仍能读到完整的预设列表。
+function resolutionSlotState(node) {
+  const state = resolutionState(node);
+  if (!state) return null;
+  return {
+    ...state,
+    presets: resolutionPresets(node),
+    alignments: resolutionAlignments(node),
+    canvas_limits: resolutionCanvasLimits(node),
+  };
 }
 
 function isSubgraphNode(node) {
@@ -205,6 +368,7 @@ function widgetOptions(widget) {
 
 function isBindableWidget(node, widget) {
   if (!widget || !widget.name || INTERNAL_WIDGETS.has(widget.name) || widget.type === "button") return false;
+  if (isResolutionWidget(node, widget)) return true;
   if (isWidgetConnected(node, widget)) return false;
   if (leafListType(slotLeafTargets(node, widget))) return true;
   if (isLoraWidget(node, widget) || isVaultWidget(node, widget)) return true;
@@ -214,6 +378,7 @@ function isBindableWidget(node, widget) {
 }
 
 function widgetLabel(node, widget) {
+  if (isResolutionWidget(node, widget)) return "分辨率预设";
   const raw = String(widget.label ?? "").trim();
   const name = String(widget.name || "").toLowerCase();
   const nodeTitle = String(node?.title || "");
@@ -231,6 +396,7 @@ function widgetLabel(node, widget) {
     text: "提示词",
     loras: "LoRA 挂载列表",
     selected_tiles_data: "预设磁贴",
+    resolution_json: "分辨率预设",
     seed: "随机种子",
     noise_seed: "随机种子",
     steps: "采样步数",
@@ -248,6 +414,7 @@ function widgetLabel(node, widget) {
 }
 
 function widgetTypeName(widget, node) {
+  if (isResolutionWidget(node, widget)) return "resolution";
   if (isLoraWidget(node, widget)) return "lm_loras";
   if (isVaultWidget(node, widget)) return "pv_tiles";
   const name = String(widget.name || "").toLowerCase();
@@ -298,7 +465,15 @@ function slotForWidget(node, widget) {
     slot.options = widgetOptions(widget).filter((value) => ["string", "number", "boolean"].includes(typeof value));
     if (typeof slot.default_val === "number") slot.value_kind = Number.isInteger(slot.default_val) ? "int" : "float";
   }
-  if (type === "lm_loras") slot.default_val = loraEntries(widget);
+  if (type === "resolution") {
+    const state = resolutionSlotState(node);
+    if (state) {
+      slot.default_val = state;
+      slot.presets = state.presets;
+      slot.alignments = state.alignments;
+      slot.canvas_limits = state.canvas_limits;
+    }
+  } else if (type === "lm_loras") slot.default_val = loraEntries(widget);
   else if (type === "pv_tiles") slot.default_val = vaultTiles(widget);
   const targets = leaves.map(({ node_id, field }) => ({ node_id, field }));
   if (!(targets.length === 1 && targets[0].node_id === String(node.id) && targets[0].field === widget.name)) {
@@ -323,16 +498,28 @@ function normalizeConfig(graph) {
     if (!leaves.length) continue;
     seen.add(key);
     const leafType = leafListType(leaves);
+    const resolution = isResolutionWidget(node, widget);
     const next = {
       ...slot,
       node_id: String(slot.node_id),
       label: String(widgetLabel(node, widget)),
       node_title: String(node.title || node.type || "节点"),
     };
-    if (leafType) next.type = leafType;
-    if (next.type === "lm_loras") next.default_val = loraEntries(widget);
-    else if (next.type === "pv_tiles") next.default_val = vaultTiles(widget);
-    else if (widget.value !== undefined) next.default_val = widget.value;
+    if (resolution) {
+      next.type = "resolution";
+      const state = resolutionSlotState(node);
+      if (state) {
+        next.default_val = state;
+        next.presets = state.presets;
+        next.alignments = state.alignments;
+        next.canvas_limits = state.canvas_limits;
+      }
+    } else {
+      if (leafType) next.type = leafType;
+      if (next.type === "lm_loras") next.default_val = loraEntries(widget);
+      else if (next.type === "pv_tiles") next.default_val = vaultTiles(widget);
+      else if (widget.value !== undefined) next.default_val = widget.value;
+    }
     if (next.type === "combo") next.options = widgetOptions(widget);
     const targets = leaves.map(({ node_id, field }) => ({ node_id, field }));
     if (targets.length === 1 && targets[0].node_id === String(node.id) && targets[0].field === widget.name) {
@@ -402,14 +589,31 @@ function isOutputNode(node) {
 function nodeMenuItems(node) {
   const config = peekConfig(app.graph);
   const slots = (config?.slots || []).filter((slot) => String(slot.node_id) === String(node.id));
-  const widgets = (node.widgets || []).filter((widget) => isBindableWidget(node, widget));
-  const submenu = widgets.map((widget) => {
+  const submenu = [];
+  // ResolutionPreset 的界面全部由 DOM 绘制，没有可枚举的 LiteGraph 控件，
+  // 这里单独给它一个槽位入口；状态仍写进 Properties，与画布完全同源。
+  if (isResolutionNode(node)) {
+    const bound = slots.some((slot) => slot.field === RESOLUTION_FIELD);
+    const state = resolutionState(node);
+    const size = state ? ` ${state.width}×${state.height}` : "";
+    submenu.push({
+      content: `${bound ? "✓" : "·"} 分辨率预设${size}`,
+      callback: () => {
+        const widget = resolutionWidget(node);
+        if (widget) setSlot(node, widget, !bound);
+      },
+    });
+  }
+  const widgets = (node.widgets || [])
+    .filter((widget) => isBindableWidget(node, widget))
+    .filter((widget) => !isResolutionWidget(node, widget));
+  submenu.push(...widgets.map((widget) => {
     const bound = slots.some((slot) => slot.field === widget.name);
     return {
       content: `${bound ? "✓" : "·"} ${widgetLabel(node, widget)}`,
       callback: () => setSlot(node, widget, !bound),
     };
-  });
+  }));
   if (submenu.length === 0) submenu.push({ content: "此节点没有可绑定输入", disabled: true });
 
   const items = [{ content: "suski 移动端槽位", has_submenu: true, submenu: { options: submenu } }];
@@ -620,6 +824,22 @@ function hookGraph(graph) {
   };
 }
 
+// ResolutionPreset 的 resolution_json 是 Aaalice 在 graphToPrompt 阶段注入的；
+// 某些加载顺序下 PocketNAI 捕获到的原生函数可能绕过这层钩子。这里在提交模板前
+// 按节点真实状态再写一次，既保证字段存在，也不受扩展加载顺序影响。
+function ensureResolutionPromptInputs(apiPrompt, config) {
+  for (const slot of config.slots || []) {
+    if (slot.type !== "resolution") continue;
+    const node = nodeById(slot.node_id);
+    if (!isResolutionNode(node)) continue;
+    const state = resolutionState(node);
+    const promptNode = apiPrompt?.[String(slot.node_id)];
+    if (!state || !promptNode || typeof promptNode !== "object") continue;
+    if (!promptNode.inputs || typeof promptNode.inputs !== "object") promptNode.inputs = {};
+    promptNode.inputs[RESOLUTION_FIELD] = JSON.stringify(resolutionPayload(state));
+  }
+}
+
 async function postTemplate() {
   const graph = app.graph;
   if (!graph) return;
@@ -629,7 +849,9 @@ async function postTemplate() {
   collectingPrompt = true;
   let result;
   try {
-    const promptFn = nativeGraphToPrompt ?? app.graphToPrompt?.bind(app);
+    // 优先走公开的 app.graphToPrompt，让其他扩展的 Prompt 钩子（例如
+    // Aaalice 的 resolution_json、模型专用输入）也进入模板；失败时退回原生。
+    const promptFn = app.graphToPrompt?.bind(app) ?? nativeGraphToPrompt;
     if (!promptFn) throw new Error("ComfyUI 还没有准备好 graphToPrompt()");
     result = await promptFn(graph);
   } finally {
@@ -639,11 +861,13 @@ async function postTemplate() {
   if (!apiPrompt || typeof apiPrompt !== "object") {
     throw new Error("graphToPrompt() 没有返回 API Prompt");
   }
+  const config = configOf(graph);
+  ensureResolutionPromptInputs(apiPrompt, config);
 
   const response = await api.fetchApi(SYNC_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ api_prompt: apiPrompt, suski_config: configOf(graph) }),
+    body: JSON.stringify({ api_prompt: apiPrompt, suski_config: config }),
   });
   if (!response.ok) {
     throw new Error(`模板同步失败（HTTP ${response.status}）`);
@@ -793,6 +1017,50 @@ function setWidgetValue(widget, value) {
   return true;
 }
 
+function applyResolutionValue(node, value) {
+  if (!isResolutionNode(node)) return false;
+  let raw = value;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+  }
+  if (!raw || typeof raw !== "object") return false;
+
+  const presets = resolutionPresets(node);
+  const current = resolutionState(node, presets);
+  const aligned = {
+    ...(current || {}),
+    ...raw,
+    version: 1,
+  };
+  const next = normalizeResolutionState(
+    aligned,
+    presets,
+    resolutionAlignments(node),
+    resolutionCanvasLimits(node),
+  );
+  if (!next) return false;
+  if (current && JSON.stringify(current) === JSON.stringify(next)) return false;
+
+  const control = node._aaaliceResolutionControl;
+  if (typeof control?.setValue === "function") {
+    try {
+      control.setValue(next);
+    } catch (error) {
+      console.warn("[PocketNAI] 写入分辨率预设失败", error);
+      return false;
+    }
+  } else {
+    node.properties ||= {};
+    node.properties[RESOLUTION_PROPERTY] = next;
+  }
+  node.graph?.setDirtyCanvas?.(true, true);
+  return true;
+}
+
 function applyRemoteValue(nodeId, field, value) {
   const config = peekConfig(app.graph);
   if (!config) return false;
@@ -802,6 +1070,11 @@ function applyRemoteValue(nodeId, field, value) {
   if (!slot) return false;
   const node = nodeById(nodeId);
   if (!node) return false;
+  // ResolutionPreset 没有真实控件，值必须回到 Aaalice 的属性状态机，
+  // 由它同步按钮文字、画布框选与宽高输入框。
+  if (slot.type === "resolution" && field === RESOLUTION_FIELD && isResolutionNode(node)) {
+    return applyResolutionValue(node, value);
+  }
   const widget = nodeWidget(node, field);
   if (!widget || isWidgetConnected(node, widget)) return false;
   const leaves = slotLeafTargets(node, widget);

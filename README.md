@@ -20,6 +20,7 @@
 - WebSocket 进度、执行错误、输出图片同步
 - 图片使用原生 `<img>`，移动端可长按保存
 - 移动端内置原生 LoRA 选择器：读取本地封面、底模、触发词与推荐权重，无需 PC 端 `lora_loader.js`
+- 支持 Aaalice `ResolutionPreset` 槽位：手机端按分组选预设或直接改宽高
 - Prompt-Vault 为可选依赖，缺失时相关入口自动隐藏
 
 ## 安装
@@ -68,6 +69,7 @@ http://<PC 的局域网 IP>:8188/suski/
 | `seed` / `slider` / `number` / `toggle` / `combo` | 任意参数控件                                            | 对应参数控件     |
 | `lm_loras`                                                | `Lora Loader (LoraManager)` 的 `loras` 控件         | 已挂载 LoRA 托盘 |
 | `pv_tiles`                                                | `PromptVaultSelector` 的 `selected_tiles_data` 控件 | 预设磁贴列表     |
+| `resolution`                                             | `ResolutionPreset`（Aaalice-Nodes）的 `resolution_json` | 分辨率预设 + 宽高 |
 
 `lm_loras` 与 `pv_tiles` 都是对象数组，提交时会转换为节点真正读取的结构：
 
@@ -79,6 +81,20 @@ http://<PC 的局域网 IP>:8188/suski/
 - 绑定在子图实例上的槽位会记录 `targets`。例如 `1526/unet_name` 会写成
   `1526:1732/model_name`，执行时只改内部真实节点；子图被删除或输入被连线时，
   PC 端会清理槽位，后端也会跳过失效目标而不是报“节点不存在”。
+
+`resolution` 槽位对接 Aaalice-Nodes 的 `ResolutionPreset`：
+
+- 该节点没有原生 LiteGraph 控件，状态保存在 `properties.resolutionPresetState`；
+  右键菜单里的「分辨率预设」会读取 `_aaaliceResolutionControl` 的预设列表与当前状态，
+  绑定后写入 `resolution_json`。
+- PC 端以 `getPresets()` / `getValue()` 取内置与个人预设；手机端按方形、竖图、横图、
+  我的预设分组展示，也可以直接改宽高。宽高按当前对齐值（8/16/32/64）取整，
+  匹配到预设时自动回填 `presetId`，否则显示「自定义」。
+- 同步模板时会按节点真实状态重新写入 `resolution_json`（`{version:1,width,height}`），
+  因此不依赖 Aaalice 的 `graphToPrompt` 钩子加载顺序；服务端注入时也只改宽高，
+  `alignment` / `canvasMax` 留在配置里供 PC 画布还原框选。
+- 手机端改分辨率会通过 `suski:apply_slots` 回到 `_aaaliceResolutionControl.setValue()`，
+  PC 画布上的下拉文字、框选和宽高输入框会一起刷新。
 
 ## 对接 Lora-Manager 与 Prompt-Vault
 
