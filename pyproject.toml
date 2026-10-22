@@ -1,0 +1,10 @@
+[project]
+name = "comfyui-suski-pocketnai"
+version = "2.0.0"
+description = "A minimal mobile controller for ComfyUI workflows with slot injection."
+requires-python = ">=3.10"
+
+[tool.comfy]
+PublisherId = "suski"
+DisplayName = "Suski PocketNAI"
+Icon = ""

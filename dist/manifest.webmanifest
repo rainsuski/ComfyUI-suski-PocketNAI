@@ -1,0 +1,35 @@
+{
+  "name": "PocketNAI · ComfyUI Mobile",
+  "short_name": "PocketNAI",
+  "description": "基于槽位注入的 ComfyUI 移动端极简控制器",
+  "id": "/suski/",
+  "start_url": "/suski/",
+  "scope": "/suski/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#080a0e",
+  "theme_color": "#0b0d12",
+  "lang": "zh-CN",
+  "categories": ["graphics", "utilities"],
+  "icons": [
+    {
+      "src": "/suski/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/suski/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/suski/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
