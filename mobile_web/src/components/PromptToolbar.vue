@@ -1,4 +1,6 @@
 <script setup>
+import AppIcon from "./AppIcon.vue";
+
 defineProps({
   showVault: { type: Boolean, default: false },
 });
@@ -8,8 +10,17 @@ defineEmits(["vault", "copy", "clear"]);
 
 <template>
   <div class="prompt-toolbar">
-    <button v-if="showVault" type="button" @click="$emit('vault')">🏛️ 预设库</button>
-    <button type="button" @click="$emit('copy')">📋 复制</button>
-    <button type="button" @click="$emit('clear')">🧹 清空</button>
+    <button v-if="showVault" type="button" @click="$emit('vault')">
+      <AppIcon name="book" :size="13" />
+      <span>预设库</span>
+    </button>
+    <button type="button" @click="$emit('copy')">
+      <AppIcon name="copy" :size="13" />
+      <span>复制</span>
+    </button>
+    <button type="button" @click="$emit('clear')">
+      <AppIcon name="clear" :size="13" />
+      <span>清空</span>
+    </button>
   </div>
 </template>

@@ -1,17 +1,27 @@
+import asyncio
 import copy
 import json
 import logging
+import os
+import posixpath
 import random
+import re
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from aiohttp import web
 
 import execution
 from server import PromptServer
+
+try:  # 脱离 ComfyUI 跑单测时允许缺失，相关接口会自动降级。
+    import folder_paths
+except Exception:  # pragma: no cover - 只在没有 ComfyUI 运行时的场景触发
+    folder_paths = None
 
 from .tag_locator import find_tags_file
 
@@ -19,9 +29,37 @@ logger = logging.getLogger("ComfyUI-suski-PocketNAI")
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 DIST_DIR = PLUGIN_ROOT / "dist"
+WORKFLOWS_DIR = PLUGIN_ROOT / "saved_workflows"
+ACTIVE_META_FILE = WORKFLOWS_DIR / "_active.json"
 CONFIG_VERSION = "2.0.0"
 MAX_SEED = 1125899906842624
 MAX_SLOT_TARGETS = 64
+MAX_TRIGGER_WORDS = 16
+WORKFLOW_ID_MAX_LENGTH = 80
+
+# 伴随文件嗅探：Lora-Manager / Civitai Helper 的命名习惯。
+PREVIEW_EXTS = (
+    ".preview.png",
+    ".preview.jpg",
+    ".preview.jpeg",
+    ".preview.webp",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+)
+METADATA_EXTS = (".metadata.json", ".civitai.info", ".json")
+LORA_FILE_EXTS = (".safetensors", ".ckpt", ".pt", ".pth", ".bin")
+PREVIEW_MIME_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".jxl"}
+# Windows 保留文件名，避免工作流落盘时直接写失败。
+WINDOWS_RESERVED_NAMES = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+}
 SLOT_TYPES = {
     "prompt",
     "negative",
@@ -36,7 +74,6 @@ SLOT_TYPES = {
 }
 # 探测可选外部插件时使用的路由：插件没装时对应入口在移动端整体隐藏。
 INTEGRATION_ROUTES = {
-    "lora_manager": "/loras",
     "prompt_vault": "/prompt_vault/api/library",
 }
 
@@ -309,6 +346,57 @@ def _random_seed() -> int:
     return random.randint(1, MAX_SEED)
 
 
+def _format_lora_strength(value) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = 1.0
+    text = f"{number:.2f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _lora_syntax(entries) -> str:
+    """把 loras 数组还原成 `<lora:name:strength[:clip]>` 文本。
+
+    Lora-Manager 的 `text` 控件是 loras 数组之外的第二个真值来源：文本里残留的
+    标签会在下一次文本回调时被重新解析回数组。后端注入时保持两者一致，模板就不会
+    带着已删除的 LoRA 继续在服务端流转。
+    """
+    if isinstance(entries, dict):
+        entries = entries.get("__value__", [])
+    if not isinstance(entries, list):
+        return ""
+    parts = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name or entry.get("active") is False:
+            continue
+        strength = _format_lora_strength(entry.get("strength", 1.0))
+        clip = _format_lora_strength(entry.get("clipStrength", entry.get("strength", 1.0)))
+        parts.append(
+            f"<lora:{name}:{strength}>" if strength == clip else f"<lora:{name}:{strength}:{clip}>"
+        )
+    return " ".join(parts)
+
+
+def _sync_lora_text_input(inputs: dict, value) -> None:
+    """把同一节点上的 `text` 纯文本控件同步成 loras 数组的语法。
+
+    只在目标节点本来就带字符串 `text` 输入时改写，绝不新增输入项，避免
+    `validate_prompt` 因未知输入报错。
+    """
+    if not isinstance(inputs, dict):
+        return
+    current = inputs.get("text")
+    if not isinstance(current, str):
+        return
+    next_text = _lora_syntax(value)
+    if current != next_text:
+        inputs["text"] = next_text
+
+
 def _inject_slots(prompt: dict, config: dict, slots_data: dict, randomize_seed: bool = True, coerced: bool = False) -> list:
     skipped = []
     for slot in config["slots"]:
@@ -351,6 +439,8 @@ def _inject_slots(prompt: dict, config: dict, slots_data: dict, randomize_seed: 
         for inputs, target_field in usable:
             if supplied:
                 inputs[target_field] = value
+                if slot["type"] == "lm_loras":
+                    _sync_lora_text_input(inputs, value)
             if randomize_seed and slot["type"] == "seed" and inputs[target_field] == -1:
                 if seed_value is None:
                     seed_value = _random_seed()
@@ -397,6 +487,404 @@ def _missing_build_response() -> web.Response:
     )
 
 
+def _write_json_atomic(path: Path, payload) -> None:
+    """先写临时文件再替换，避免进程中断留下半截 JSON。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def _read_json_file(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+class WorkflowStore:
+    """服务端工作流持久化：每条工作流一个 JSON，另有 `_active.json` 记录活动项。
+
+    目录结构：
+
+        saved_workflows/
+            _active.json          {"active_id": "<id>"}
+            <id>.json             {"id", "title", "api_prompt", "suski_config", "updated_at"}
+
+    `_state` 依然是运行时缓存，但重启后可以从这里恢复，移动端也能列出并切换历史工作流。
+    """
+
+    lock = threading.RLock()
+
+    @staticmethod
+    def _safe_id(title: str) -> str:
+        """把任意标题收敛成跨平台安全的文件名（不含扩展名）。"""
+        cleaned = re.sub(r'[\x00-\x1f\x7f\\/*?:"<>|]+', "_", str(title or ""))
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        cleaned = re.sub(r"[^\w\-. ]+", "_", cleaned, flags=re.UNICODE)
+        cleaned = cleaned.strip(" ._")
+        if not cleaned:
+            return "default_workflow"
+        cleaned = cleaned[:WORKFLOW_ID_MAX_LENGTH].strip(" ._") or "default_workflow"
+        if cleaned.casefold() in WINDOWS_RESERVED_NAMES:
+            cleaned = f"wf_{cleaned}"
+        return cleaned.casefold()
+
+    @classmethod
+    def _path(cls, file_id: str) -> Path:
+        return WORKFLOWS_DIR / f"{file_id}.json"
+
+    @classmethod
+    def save(cls, title: str, api_prompt: dict, config: dict, updated_at: str) -> str:
+        file_id = cls._safe_id(title)
+        payload = {
+            "id": file_id,
+            "title": str(title or config.get("display_title") or file_id)[:120],
+            "api_prompt": api_prompt,
+            "suski_config": config,
+            "updated_at": updated_at,
+        }
+        with cls.lock:
+            _write_json_atomic(cls._path(file_id), payload)
+            _write_json_atomic(ACTIVE_META_FILE, {"active_id": file_id})
+        return file_id
+
+    @classmethod
+    def list_all(cls) -> list:
+        if not WORKFLOWS_DIR.is_dir():
+            return []
+        results = []
+        for path in WORKFLOWS_DIR.glob("*.json"):
+            if path.name.startswith(("_", ".")):
+                continue
+            data = _read_json_file(path)
+            if not isinstance(data, dict):
+                continue
+            config = data.get("suski_config")
+            if not isinstance(config, dict):
+                config = {}
+            slots = config.get("slots")
+            if not isinstance(slots, list):
+                slots = []
+            results.append(
+                {
+                    "id": str(data.get("id") or path.stem),
+                    "title": str(data.get("title") or config.get("display_title") or path.stem),
+                    "slots_count": len(slots),
+                    "updated_at": str(data.get("updated_at") or ""),
+                }
+            )
+        # 按更新时间倒序；时间戳相同的按标题稳定排序。
+        results.sort(key=lambda item: (item["updated_at"], item["title"]), reverse=True)
+        return results
+
+    @classmethod
+    def active_id(cls) -> str | None:
+        data = _read_json_file(ACTIVE_META_FILE)
+        if not isinstance(data, dict):
+            return None
+        active = str(data.get("active_id") or "").strip()
+        return active or None
+
+    @classmethod
+    def mark_active(cls, file_id: str) -> None:
+        """只更新活动项指针，用于切换工作流时与 `_state` 在同一临界区落盘。"""
+        with cls.lock:
+            _write_json_atomic(ACTIVE_META_FILE, {"active_id": str(file_id)})
+
+    @classmethod
+    def load(cls, file_id: str) -> dict:
+        """读取并校验一条工作流，成功时把它标记为活动项。"""
+        raw_id = str(file_id or "").strip()
+        candidates = []
+        # 先按文件名原样匹配（兼容手工放入或旧版本写下的文件），再退回规范化 id。
+        if raw_id and not raw_id.startswith(".") and not re.search(r'[\\/*?:"<>|]', raw_id):
+            candidates.append(raw_id)
+        normalized_id = cls._safe_id(raw_id)
+        if normalized_id not in candidates:
+            candidates.append(normalized_id)
+
+        target = next(
+            (cls._path(candidate) for candidate in candidates if cls._path(candidate).is_file()),
+            None,
+        )
+        if target is None:
+            raise FileNotFoundError(f"找不到工作流: {file_id}")
+        cleaned_id = target.stem
+        data = _read_json_file(target)
+        if not isinstance(data, dict):
+            raise ValueError(f"工作流文件不是合法 JSON: {target.name}")
+
+        api_prompt = data.get("api_prompt")
+        raw_config = data.get("suski_config")
+        if not isinstance(api_prompt, dict):
+            raise ValueError(f"工作流缺少 api_prompt: {target.name}")
+        if not isinstance(raw_config, dict):
+            raise ValueError(f"工作流缺少 suski_config: {target.name}")
+
+        try:
+            config = _clean_config(raw_config)
+        except ValueError as err:
+            raise ValueError(f"工作流槽位数据损坏: {err}") from None
+
+        with cls.lock:
+            _write_json_atomic(ACTIVE_META_FILE, {"active_id": cleaned_id})
+        return {
+            "id": cleaned_id,
+            "title": str(data.get("title") or config["display_title"])[:120],
+            "api_prompt": api_prompt,
+            "suski_config": config,
+            "updated_at": str(data.get("updated_at") or ""),
+        }
+
+    @classmethod
+    def restore_active(cls) -> dict | None:
+        """启动时恢复上次活动的工作流；文件损坏时依次回退到其他可用项。"""
+        candidates = []
+        active_id = cls.active_id()
+        if active_id:
+            candidates.append(active_id)
+        candidates.extend(item["id"] for item in cls.list_all())
+        for file_id in dict.fromkeys(candidates):
+            try:
+                return cls.load(file_id)
+            except (FileNotFoundError, ValueError) as err:
+                logger.warning("PocketNAI 跳过无法恢复的工作流 %s：%s", file_id, err)
+        return None
+
+
+def _restore_active_workflow() -> None:
+    try:
+        restored = WorkflowStore.restore_active()
+    except Exception:  # 恢复失败不能阻止 ComfyUI 启动
+        logger.exception("PocketNAI 恢复活动工作流时发生异常")
+        return
+    if not restored:
+        return
+    with _state_lock:
+        _state["api_prompt"] = restored["api_prompt"]
+        _state["config"] = restored["suski_config"]
+        _state["updated_at"] = restored["updated_at"]
+    logger.info(
+        "PocketNAI 已恢复活跃工作流「%s」（%d 个槽位）",
+        restored["suski_config"]["display_title"],
+        len(restored["suski_config"]["slots"]),
+    )
+
+
+def _store_workflow_safely(api_prompt: dict, config: dict, updated_at: str) -> str | None:
+    """落盘失败只记日志：磁盘只读或路径异常不应阻断同步/生成。"""
+    try:
+        return WorkflowStore.save(config["display_title"], api_prompt, config, updated_at)
+    except Exception:
+        logger.exception("PocketNAI 工作流落盘失败（标题「%s」）", config.get("display_title"))
+        return None
+
+
+# 模块导入即代表插件加载，此时恢复上次的活动工作流。
+_restore_active_workflow()
+
+
+# ---------------------------------------------------------------------------
+# LoRA 伴随元数据嗅探
+# ---------------------------------------------------------------------------
+
+_lora_meta_cache: dict[str, tuple[tuple, dict]] = {}
+_lora_meta_lock = threading.Lock()
+
+
+def _lora_identifier(name: str) -> str:
+    """把相对文件路径转成 loras 数组里使用的名字（去掉模型扩展名，统一 `/`）。"""
+    normalized = str(name or "").replace("\\", "/")
+    lowered = normalized.lower()
+    for ext in LORA_FILE_EXTS:
+        if lowered.endswith(ext):
+            return normalized[: -len(ext)]
+    return normalized
+
+
+def _lora_preview_url(preview_rel: str) -> str:
+    return f"/suski/api/lora_preview?name={quote(preview_rel)}"
+
+
+def _first_text(value) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return None
+
+
+def _iter_metadata_sources(meta: dict):
+    """Yield 顶层与常见嵌套层，兼容 .metadata.json / .civitai.info 两种结构。"""
+    yield meta
+    for key in ("civitai", "modelVersion", "model", "version"):
+        nested = meta.get(key)
+        if isinstance(nested, dict):
+            yield nested
+
+
+def _extract_trigger_words(meta: dict) -> list:
+    words: list[str] = []
+    seen = set()
+    for source in _iter_metadata_sources(meta):
+        for key in ("trainedWords", "trigger_words", "triggerWords", "activation_text", "activationText"):
+            raw = source.get(key)
+            if isinstance(raw, str):
+                raw = re.split(r"[,\n;，；]", raw)
+            if not isinstance(raw, list):
+                continue
+            for item in raw:
+                word = str(item).strip()
+                if not word or word in seen:
+                    continue
+                seen.add(word)
+                words.append(word)
+                if len(words) >= MAX_TRIGGER_WORDS:
+                    return words
+    return words
+
+
+def _extract_preferred_weight(meta: dict) -> float:
+    for source in _iter_metadata_sources(meta):
+        for key in ("preferredWeight", "preferred_weight", "recommended_weight", "weight"):
+            candidate = source.get(key)
+            if candidate is None or isinstance(candidate, bool):
+                continue
+            try:
+                return round(float(candidate), 2)
+            except (TypeError, ValueError):
+                continue
+        # Lora-Manager 把推荐权重写在 usage_tips 这个 JSON 字符串里。
+        tips = source.get("usage_tips") or source.get("usageTips")
+        if isinstance(tips, str):
+            try:
+                tips = json.loads(tips)
+            except (json.JSONDecodeError, TypeError):
+                tips = None
+        if isinstance(tips, dict):
+            for key in ("strength", "clipStrength", "weight"):
+                candidate = tips.get(key)
+                if candidate is None or isinstance(candidate, bool):
+                    continue
+                try:
+                    return round(float(candidate), 2)
+                except (TypeError, ValueError):
+                    continue
+    return 1.0
+
+
+def _extract_base_model(meta: dict) -> str | None:
+    for source in _iter_metadata_sources(meta):
+        for key in ("base_model", "baseModel"):
+            value = _first_text(source.get(key))
+            if value:
+                return value
+    return None
+
+
+def _read_lora_sidecar(meta_path: Path) -> dict | None:
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _lora_cache_signature(full_path: Path) -> tuple:
+    try:
+        return (full_path.stat().st_mtime_ns, full_path.parent.stat().st_mtime_ns)
+    except OSError:
+        return (0, 0)
+
+
+def _empty_lora_info(lora_name: str) -> dict:
+    normalized = str(lora_name or "").replace("\\", "/")
+    folder = posixpath.dirname(normalized)
+    return {
+        "name": _lora_identifier(normalized),
+        "file_name": normalized,
+        "base_name": Path(normalized).stem,
+        "folder": folder,
+        "has_meta": False,
+        "trigger_words": [],
+        "preferred_weight": 1.0,
+        "base_model": None,
+        "preview_url": None,
+    }
+
+
+def _inspect_lora_metadata(lora_name: str) -> dict:
+    """零外网请求地读取 LoRA 的本地伴随文件（封面 / .metadata.json / .civitai.info）。"""
+    info = _empty_lora_info(lora_name)
+    if folder_paths is None:
+        return info
+
+    try:
+        full_path = folder_paths.get_full_path("loras", str(lora_name))
+    except Exception:
+        logger.exception("PocketNAI 解析 LoRA 路径失败：%s", lora_name)
+        return info
+    if not full_path or not os.path.isfile(full_path):
+        return info
+
+    path = Path(full_path)
+    signature = _lora_cache_signature(path)
+    with _lora_meta_lock:
+        cached = _lora_meta_cache.get(str(lora_name))
+    if cached and cached[0] == signature:
+        return copy.deepcopy(cached[1])
+
+    directory = posixpath.dirname(str(lora_name).replace("\\", "/"))
+
+    def sidecar_relative(file_name: str) -> str:
+        return f"{directory}/{file_name}" if directory else file_name
+
+    # 1. 本地封面：<stem>.preview.png / <stem>.png ...
+    for ext in PREVIEW_EXTS:
+        candidate = path.with_name(f"{path.stem}{ext}")
+        if candidate.is_file():
+            info["preview_url"] = _lora_preview_url(sidecar_relative(candidate.name))
+            break
+
+    # 2. 伴随元数据：<stem>.metadata.json / <stem>.civitai.info / <stem>.json
+    for ext in METADATA_EXTS:
+        candidate = path.with_name(f"{path.stem}{ext}")
+        if not candidate.is_file():
+            continue
+        meta = _read_lora_sidecar(candidate)
+        if meta is None:
+            continue
+        info["has_meta"] = True
+        info["trigger_words"] = _extract_trigger_words(meta)
+        info["preferred_weight"] = _extract_preferred_weight(meta)
+        info["base_model"] = _extract_base_model(meta)
+        break
+
+    with _lora_meta_lock:
+        _lora_meta_cache[str(lora_name)] = (signature, info)
+    return copy.deepcopy(info)
+
+
+def _build_lora_list() -> list:
+    if folder_paths is None:
+        return []
+    try:
+        names = folder_paths.get_filename_list("loras")
+    except Exception:
+        logger.exception("PocketNAI 读取 LoRA 列表失败")
+        return []
+
+    items = []
+    for name in sorted(names):
+        try:
+            items.append(_inspect_lora_metadata(name))
+        except Exception:
+            logger.exception("PocketNAI 解析 LoRA 元数据失败：%s", name)
+            items.append(_empty_lora_info(name))
+    return items
+
+
 def register_routes():
     routes = PromptServer.instance.routes
 
@@ -410,6 +898,102 @@ def register_routes():
         return web.json_response(
             {name: path in registered for name, path in INTEGRATION_ROUTES.items()}
         )
+
+    @routes.get("/suski/api/workflows")
+    async def get_workflows(request: web.Request):
+        with _state_lock:
+            current_title = _state["config"].get("display_title") if _state["config"] else None
+        workflows = await asyncio.to_thread(WorkflowStore.list_all)
+        active_id = await asyncio.to_thread(WorkflowStore.active_id)
+        return web.json_response(
+            {
+                "ok": True,
+                "active_id": active_id,
+                "active_title": current_title,
+                "workflows": workflows,
+            }
+        )
+
+    @routes.post("/suski/api/workflows/switch")
+    async def switch_workflow(request: web.Request):
+        try:
+            data = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return _error("非法 JSON 请求")
+        if not isinstance(data, dict):
+            return _error("请求体必须是 JSON 对象")
+
+        target_id = str(data.get("id") or "").strip()
+        if not target_id:
+            return _error("缺少 workflow id")
+
+        try:
+            workflow = await asyncio.to_thread(WorkflowStore.load, target_id)
+        except FileNotFoundError:
+            return _error("指定的工作流不存在", status=404)
+        except ValueError as err:
+            return _error("工作流数据损坏", details=str(err))
+
+        config = workflow["suski_config"]
+        with _state_lock:
+            _state["api_prompt"] = workflow["api_prompt"]
+            _state["config"] = config
+            _state["updated_at"] = workflow["updated_at"]
+            # 锁内重写活动项指针，确保最后一个拿到锁的操作同时决定 state 与 _active.json。
+            try:
+                WorkflowStore.mark_active(workflow["id"])
+            except OSError:
+                logger.exception("PocketNAI 写入活动工作流指针失败")
+
+        logger.info(
+            "PocketNAI 已切换到工作流「%s」（%d 个槽位）",
+            config["display_title"],
+            len(config["slots"]),
+        )
+        PromptServer.instance.send_sync(
+            "suski:template_synced",
+            {
+                "title": config["display_title"],
+                "slots": len(config["slots"]),
+                "updated_at": workflow["updated_at"],
+            },
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "id": workflow["id"],
+                "title": config["display_title"],
+                "slots": len(config["slots"]),
+                "updated_at": workflow["updated_at"],
+            }
+        )
+
+    @routes.get("/suski/api/loras")
+    async def list_available_loras(request: web.Request):
+        if request.query.get("refresh"):
+            with _lora_meta_lock:
+                _lora_meta_cache.clear()
+        items = await asyncio.to_thread(_build_lora_list)
+        return web.json_response({"ok": True, "loras": items})
+
+    @routes.get("/suski/api/lora_preview")
+    async def serve_lora_preview(request: web.Request):
+        name = str(request.query.get("name") or "").strip()
+        if not name or folder_paths is None:
+            return web.Response(status=404)
+        if Path(name).suffix.lower() not in PREVIEW_MIME_EXTS:
+            return web.Response(status=404)
+        try:
+            full_path = folder_paths.get_full_path("loras", name)
+        except Exception:
+            logger.exception("PocketNAI 读取 LoRA 封面失败：%s", name)
+            return web.Response(status=404)
+        if not full_path or not os.path.isfile(full_path):
+            return web.Response(status=404)
+        response = web.FileResponse(full_path)
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
     @routes.post("/suski/api/sync_template")
     async def sync_template(request: web.Request):
@@ -433,10 +1017,13 @@ def register_routes():
             return _error("suski_config 格式错误", details=str(err))
 
         updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        api_copy = copy.deepcopy(api_prompt)
         with _state_lock:
-            _state["api_prompt"] = copy.deepcopy(api_prompt)
+            _state["api_prompt"] = api_copy
             _state["config"] = config
             _state["updated_at"] = updated_at
+            # 落盘与 _state 在同一临界区：切换工作流的活动项指针不会和写回交错。
+            workflow_id = _store_workflow_safely(api_copy, config, updated_at)
 
         logger.info(
             "PocketNAI 已同步模板「%s」，槽位 %d 个",
@@ -454,6 +1041,7 @@ def register_routes():
         return web.json_response(
             {
                 "ok": True,
+                "id": workflow_id,
                 "title": config["display_title"],
                 "slots": len(config["slots"]),
                 "updated_at": updated_at,
@@ -520,6 +1108,7 @@ def register_routes():
             _state["api_prompt"] = template
             _state["config"] = config
             _state["updated_at"] = updated_at
+            workflow_id = _store_workflow_safely(template, config, updated_at)
 
         if skipped:
             logger.warning(
@@ -531,6 +1120,7 @@ def register_routes():
         return web.json_response(
             {
                 "ok": True,
+                "id": workflow_id,
                 "applied": len(requested),
                 "skipped": len(skipped),
                 "updated_at": updated_at,
@@ -607,6 +1197,63 @@ def register_routes():
                 "number": number,
                 "title": config["display_title"],
                 "skipped": len(skipped),
+            }
+        )
+
+    @routes.post("/suski/api/cancel")
+    async def cancel_generation(request: web.Request):
+        """停止生成：中断正在执行的任务，并把它从等待队列里移除。
+
+        优先使用 ComfyUI 的原子接口 `PromptQueue.interrupt_if_running`，避免中断信号
+        落到已经接替执行的另一条任务上；老版本没有该接口时退回全局中断。
+        """
+        try:
+            data = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return _error("请求体不是合法 JSON")
+        if not isinstance(data, dict):
+            return _error("请求体必须是 JSON 对象")
+        prompt_id = str(data.get("prompt_id") or "").strip()
+        if not prompt_id:
+            return _error("缺少 prompt_id")
+
+        queue = PromptServer.instance.prompt_queue
+        interrupted = False
+        removed = False
+
+        interrupt = getattr(queue, "interrupt_if_running", None)
+        try:
+            if callable(interrupt):
+                interrupted = bool(interrupt(prompt_id))
+            else:
+                import nodes  # 旧版本回退：只能全局中断
+
+                nodes.interrupt_processing()
+                interrupted = True
+        except Exception:
+            logger.exception("PocketNAI 中断任务失败：%s", prompt_id)
+
+        try:
+            removed = bool(queue.delete_queue_item(lambda item: item[1] == prompt_id))
+        except Exception:
+            logger.exception("PocketNAI 清理排队任务失败：%s", prompt_id)
+
+        stopped = interrupted or removed
+        if stopped:
+            logger.info(
+                "PocketNAI 已停止任务 %s（interrupt=%s, dequeue=%s）",
+                prompt_id,
+                interrupted,
+                removed,
+            )
+        else:
+            logger.info("PocketNAI 任务 %s 已结束，无需停止", prompt_id)
+        return web.json_response(
+            {
+                "ok": True,
+                "stopped": stopped,
+                "interrupted": interrupted,
+                "removed": removed,
             }
         )
 

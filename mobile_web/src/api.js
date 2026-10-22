@@ -72,12 +72,39 @@ export function executePrompt(slotsData) {
   });
 }
 
+// 停止生成：后端会中断正在执行的任务，并把它从等待队列里移除。
+export function cancelPrompt(promptId) {
+  return requestJson("/suski/api/cancel", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt_id: promptId }),
+  });
+}
+
 export function applySlots(slotsData) {
   return requestJson("/suski/api/apply_slots", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ client_id: clientId, slots_data: slotsData }),
   });
+}
+
+// 已落盘的工作流列表（含当前活动项）。
+export function fetchWorkflows() {
+  return requestJson("/suski/api/workflows");
+}
+
+export function switchWorkflow(id) {
+  return requestJson("/suski/api/workflows/switch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+}
+
+// 本地 LoRA 库 + 伴随元数据（封面 / 底模 / 触发词 / 推荐权重）。
+export function fetchAvailableLoras({ refresh = false } = {}) {
+  return requestJson(`/suski/api/loras${refresh ? "?refresh=1" : ""}`);
 }
 
 export function randomSeed() {

@@ -2,20 +2,24 @@
 import { computed, onBeforeUnmount, onMounted, reactive, shallowRef, watch } from "vue";
 import TagTextarea from "./TagTextarea.vue";
 import ActiveLoraTray from "./components/ActiveLoraTray.vue";
-import LoraModalFrame from "./components/LoraModalFrame.vue";
+import AppIcon from "./components/AppIcon.vue";
 import PromptToolbar from "./components/PromptToolbar.vue";
 import PromptVaultSheet from "./components/PromptVaultSheet.vue";
+import WorkflowSwitcher from "./components/WorkflowSwitcher.vue";
 import {
   ApiError,
   applySlots,
   buildImageUrl,
+  cancelPrompt,
   clientId,
   executePrompt,
+  fetchWorkflows,
   getConfig,
   getIntegrations,
   imageFromOutput,
   MAX_SEED,
   randomSeed,
+  switchWorkflow,
 } from "./api.js";
 import { readLoraList } from "./integrations/loraManager.js";
 import {
@@ -39,6 +43,8 @@ const GENERIC_LABELS = new Set(["值", "value", "文本", "text", "字符串", "
 const WRITE_DELAY = 450;
 
 const tags = shallowRef([]);
+const workflowList = shallowRef([]);
+const loraTrayRefs = new Map();
 const values = reactive({});
 const dirtyKeys = new Set();
 const promptRefs = new Map();
@@ -54,6 +60,7 @@ const state = reactive({
   updatedAt: null,
   connection: "connecting",
   generating: false,
+  stopping: false,
   progress: null,
   currentNode: null,
   error: "",
@@ -64,12 +71,16 @@ const state = reactive({
   imageError: false,
   tagsStatus: "loading",
   advancedOpen: false,
-  integrations: { lora_manager: false, prompt_vault: false },
+  integrations: { prompt_vault: false },
   vault: null,
   vaultStatus: "idle",
   vaultSheet: false,
   vaultTarget: null,
-  loraFrame: false,
+  workflowDrawer: false,
+  workflowLoading: false,
+  workflowError: "",
+  workflowActiveId: "",
+  workflowBusyId: "",
 });
 
 let configInFlight = null;
@@ -236,12 +247,22 @@ function mergeListValue(slot, incoming, previousRaw) {
   return merged;
 }
 
-function applyConfig(config) {
+function applyConfig(config, { reset = false } = {}) {
   // 结构变化只重置新增、改类型或消失的槽位；正在编辑的值不会被模板同步打断。
+  // 切换工作流时 reset=true：即便节点 id 与槽位名完全相同，也强制回到新模板的默认值。
   const previousTypes = new Map((state.config?.slots || []).map((slot) => [slotKey(slot), slot.type]));
   const previousDefaults = new Map(
     (state.config?.slots || []).map((slot) => [slotKey(slot), JSON.stringify(slot.default_val ?? null)]),
   );
+
+  if (reset) {
+    dirtyKeys.clear();
+    listRemovals.clear();
+    writePending.clear();
+    for (const timer of writeTimers.values()) clearTimeout(timer);
+    writeTimers.clear();
+    for (const key of Object.keys(values)) delete values[key];
+  }
 
   const keys = new Set();
   for (const slot of config.slots || []) {
@@ -531,13 +552,21 @@ function formatError(error) {
   return error?.message || "请求失败，请检查 ComfyUI 是否在线";
 }
 
-async function loadConfig({ quiet = false } = {}) {
+async function loadConfig({ quiet = false, reset = false } = {}) {
+  // 切换工作流必须读到切换之后的状态：先等在途请求结束，再发一次新的读取。
+  while (configInFlight && reset) {
+    try {
+      await configInFlight;
+    } catch {
+      // 在途请求的失败由它自己的 catch 处理。
+    }
+  }
   if (configInFlight) return configInFlight;
   configInFlight = (async () => {
     try {
       const data = await getConfig();
       if (data?.has_template && data.config) {
-        applyConfig(data.config);
+        applyConfig(data.config, { reset });
         state.updatedAt = data.updated_at || null;
         if (!quiet) state.error = "";
       } else {
@@ -592,10 +621,7 @@ async function loadTags() {
 async function loadIntegrations() {
   try {
     const data = await getIntegrations();
-    state.integrations = {
-      lora_manager: Boolean(data?.lora_manager),
-      prompt_vault: Boolean(data?.prompt_vault),
-    };
+    state.integrations = { prompt_vault: Boolean(data?.prompt_vault) };
   } catch {
     // 探测失败就当作插件不可用，原生槽位照常工作。
   }
@@ -630,10 +656,10 @@ function appendSnippet(current, snippet) {
   return /[\s,([:]$/.test(base) ? `${base} ${snippet}` : `${base}, ${snippet}`;
 }
 
-function insertSnippet(key, snippet) {
+function insertSnippet(key, snippet, options) {
   const textarea = promptRefs.get(key);
   if (textarea?.insertAtCursor) {
-    textarea.insertAtCursor(snippet);
+    textarea.insertAtCursor(snippet, options);
     return;
   }
   setValue(key, appendSnippet(values[key], snippet));
@@ -669,11 +695,12 @@ function handleVaultInsert(entry) {
   const text = entryText(entry);
   if (!target || !text) return;
   if (target.mode === "tiles") {
-    if (addVaultTile(target.key, entry)) showToast("已加入磁贴");
+    if (addVaultTile(target.key, entry)) showToast("已加入磁贴", "success");
     return;
   }
-  insertSnippet(target.key, formatPromptWeight(text, entry.weight));
-  showToast("已插入预设词条");
+  // focus:false：抽屉还开着，不能让手机键盘从遮罩后面弹出来。
+  insertSnippet(target.key, formatPromptWeight(text, entry.weight), { focus: false });
+  showToast(`已插入${entry.title ? `「${entry.title}」` : "预设词条"}`, "success");
 }
 
 function handleVaultGroup(group) {
@@ -700,12 +727,16 @@ function handleVaultGroup(group) {
       return;
     }
     setValue(target.key, current);
-    showToast(`已载入 ${added} 个磁贴`);
+    showToast(`已载入 ${added} 个磁贴`, "success");
     return;
   }
 
-  insertSnippet(target.key, members.map((entry) => formatPromptWeight(entryText(entry), entry.weight)).join(", "));
-  showToast(`已载入组合「${group.title}」`);
+  insertSnippet(
+    target.key,
+    members.map((entry) => formatPromptWeight(entryText(entry), entry.weight)).join(", "),
+    { focus: false },
+  );
+  showToast(`已载入组合「${group.title}」`, "success");
 }
 
 function tileValue(slot) {
@@ -771,14 +802,71 @@ function endTileDrag() {
   tileDrag = null;
 }
 
-function openLoraFrame() {
-  if (!state.integrations.lora_manager) return;
-  state.loraFrame = true;
+// LoRA 托盘的选择器由托盘自己持有，这里只保留一个入口给字段头部的按钮。
+function setLoraTrayRef(key, instance) {
+  if (instance) loraTrayRefs.set(key, instance);
+  else loraTrayRefs.delete(key);
 }
 
-function closeLoraFrame() {
-  state.loraFrame = false;
-  void loadConfig({ quiet: true });
+function openLoraPicker(slot) {
+  loraTrayRefs.get(slotKey(slot))?.openPicker?.();
+}
+
+async function refreshWorkflows() {
+  state.workflowLoading = true;
+  state.workflowError = "";
+  try {
+    const data = await fetchWorkflows();
+    workflowList.value = Array.isArray(data?.workflows) ? data.workflows : [];
+    state.workflowActiveId = String(data?.active_id || "");
+  } catch (error) {
+    state.workflowError = formatError(error);
+  } finally {
+    state.workflowLoading = false;
+  }
+}
+
+async function openWorkflowDrawer() {
+  // 从侧边菜单进入时先收起菜单，避免两层抽屉叠在一起。
+  state.drawer = false;
+  state.workflowDrawer = true;
+  await refreshWorkflows();
+}
+
+function closeWorkflowDrawer() {
+  state.workflowDrawer = false;
+}
+
+async function handleSwitchWorkflow(workflow) {
+  const id = typeof workflow === "string" ? workflow : workflow?.id;
+  if (!id || state.workflowBusyId) return;
+  state.workflowBusyId = id;
+  try {
+    // 先把上一次编辑的 debounce 写回落地，避免切换后这些请求落到新工作流的同 id 槽位上。
+    await flushPendingWrites();
+    const result = await switchWorkflow(id);
+    await loadConfig({ quiet: false, reset: true });
+    state.workflowActiveId = String(result?.id || id);
+    state.workflowDrawer = false;
+    showToast(`已切换到「${state.config?.display_title || "工作流"}」`, "success");
+  } catch (error) {
+    showToast(`切换失败：${formatError(error)}`, "error");
+  } finally {
+    state.workflowBusyId = "";
+  }
+}
+
+// LoRA 触发词一键插入正面提示词：优先落在光标处，没有光标时按逗号分隔追加。
+function handleInsertWord(word) {
+  const snippet = String(word || "").trim();
+  if (!snippet) return;
+  const slot = promptSlots.value.find((entry) => entry.type === "prompt") || promptSlots.value[0];
+  if (!slot) {
+    showToast("当前模板没有提示词槽位", "error");
+    return;
+  }
+  insertSnippet(slotKey(slot), snippet, { focus: false });
+  showToast(`已插入触发词：${snippet}`);
 }
 
 async function copyPrompt(slot) {
@@ -882,6 +970,7 @@ function finishRun(target, errorMessage = "") {
   run = null;
 
   state.generating = false;
+  state.stopping = false;
   state.progress = null;
   state.currentNode = null;
 
@@ -894,6 +983,44 @@ function finishRun(target, errorMessage = "") {
     showToast("生成完成", "success");
   } else if (promptId) {
     void hydrateFromHistory(promptId);
+  }
+}
+
+// 用户主动停止：不弹错误横幅，只收掉运行态并给一条轻提示。
+function stopRun(message = "已停止生成") {
+  if (!run) {
+    state.generating = false;
+    state.stopping = false;
+    state.progress = null;
+    state.currentNode = null;
+    return;
+  }
+  run.finished = true;
+  clearRunTimers(run);
+  run = null;
+  state.generating = false;
+  state.stopping = false;
+  state.progress = null;
+  state.currentNode = null;
+  showToast(message);
+}
+
+async function stopGeneration() {
+  if (!state.generating || state.stopping) return;
+  const promptId = run?.promptId;
+  if (!promptId) {
+    // 运行态异常（例如页面在任务中途恢复）时至少把本地状态收干净。
+    stopRun("已停止生成");
+    return;
+  }
+  state.stopping = true;
+  try {
+    const result = await cancelPrompt(promptId);
+    // 后端同时尝试中断正在执行的任务并清理队列；两者都为 false 说明任务已经结束。
+    stopRun(result?.stopped ? "已停止生成" : "任务已经结束");
+  } catch (error) {
+    state.stopping = false;
+    showToast(`停止失败：${formatError(error)}`, "error");
   }
 }
 
@@ -978,7 +1105,7 @@ function startRunPolling(target) {
 }
 
 async function generate() {
-  if (!state.hasTemplate || state.generating) return;
+  if (!state.hasTemplate || state.generating || state.stopping) return;
   state.error = "";
   try {
     await flushPendingWrites();
@@ -993,6 +1120,7 @@ async function generate() {
       pollAttempts: 0,
     };
     state.generating = true;
+    state.stopping = false;
     state.progress = null;
     state.currentNode = "等待执行";
     showToast(
@@ -1013,6 +1141,7 @@ function handleSocketMessage(message) {
   const data = message.data || {};
   if (message.type === "suski:template_synced") {
     scheduleConfigLoad();
+    if (state.workflowDrawer) void refreshWorkflows();
     return;
   }
   if (message.type === "prompt_vault:library_updated") {
@@ -1210,15 +1339,15 @@ function onOffline() {
 
 function onKeydown(event) {
   if (event.key !== "Escape") return;
-  if (state.loraFrame) closeLoraFrame();
-  else if (state.vaultSheet) closeVaultSheet();
+  if (state.vaultSheet) closeVaultSheet();
+  else if (state.workflowDrawer) closeWorkflowDrawer();
   else if (state.drawer) closeDrawer();
 }
 
 watch(
-  () => [state.drawer, state.loraFrame, state.vaultSheet],
-  ([drawer, frame, sheet]) => {
-    document.body.classList.toggle("drawer-open", Boolean(drawer || frame || sheet));
+  () => [state.drawer, state.vaultSheet, state.workflowDrawer],
+  ([drawer, sheet, workflows]) => {
+    document.body.classList.toggle("drawer-open", Boolean(drawer || sheet || workflows));
   },
 );
 
@@ -1263,14 +1392,22 @@ onBeforeUnmount(() => {
 
     <header class="app-header">
       <button class="icon-button" type="button" aria-label="打开菜单" @click="openDrawer">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M4 7h16M4 12h16M4 17h10" />
-        </svg>
+        <AppIcon name="menu" :size="20" />
       </button>
 
       <div class="brand-block">
         <div class="brand-kicker"><span class="brand-mark"></span> PocketNAI</div>
-        <h1>{{ state.hasTemplate ? title : "移动端控制器" }}</h1>
+        <h1>
+          <button
+            class="brand-title"
+            type="button"
+            :title="state.hasTemplate ? '切换工作流' : '选择已保存的工作流'"
+            @click="openWorkflowDrawer"
+          >
+            <span class="brand-title-text">{{ state.hasTemplate ? title : "移动端控制器" }}</span>
+            <AppIcon class="brand-caret" name="chevronDown" :size="13" :stroke-width="2.2" />
+          </button>
+        </h1>
       </div>
 
       <button
@@ -1292,7 +1429,7 @@ onBeforeUnmount(() => {
           <p>{{ state.error }}</p>
         </div>
         <button type="button" aria-label="关闭错误提示" @click="dismissError">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+          <AppIcon name="close" :size="14" />
         </button>
       </div>
 
@@ -1322,11 +1459,12 @@ onBeforeUnmount(() => {
         <p class="empty-copy">在 PC 端画布上右键任意节点，把想交给手机的输入绑定成槽位。保存或排队后，模板会自动推送过来。</p>
         <ol class="empty-steps">
           <li><span>01</span>在 ComfyUI 打开工作流</li>
-          <li><span>02</span>节点右键 → 📱 suski 移动端槽位</li>
-          <li><span>03</span>为 SaveImage 设置 🎯 主输出</li>
+          <li><span>02</span>节点右键 → suski 移动端槽位</li>
+          <li><span>03</span>为 SaveImage 设置主输出</li>
         </ol>
         <div class="empty-actions">
           <button class="primary-button" type="button" @click="refreshTemplate(true)">重新读取模板</button>
+          <button class="ghost-button" type="button" @click="openWorkflowDrawer">选择已保存工作流</button>
           <a class="ghost-button" href="/" target="_blank" rel="noopener">打开 ComfyUI</a>
         </div>
       </section>
@@ -1341,21 +1479,21 @@ onBeforeUnmount(() => {
         <section v-for="slot in loraSlots" :key="slotKey(slot)" class="field-card panel lora-panel">
           <div class="field-head">
             <div class="field-heading">
-              <span class="field-glyph" aria-hidden="true">⚡</span>
+              <span class="field-glyph" aria-hidden="true">
+                <AppIcon name="bolt" :size="13" />
+              </span>
               <label>{{ slotLabel(slot) }}</label>
             </div>
-            <button
-              v-if="state.integrations.lora_manager"
-              class="mini-button"
-              type="button"
-              @click="openLoraFrame"
-            >
-              🌐 打开 LoRA 资源库
+            <button class="mini-button" type="button" @click="openLoraPicker(slot)">
+              <AppIcon name="plus" :size="12" />
+              <span>添加 LoRA</span>
             </button>
           </div>
           <ActiveLoraTray
+            :ref="(instance) => setLoraTrayRef(slotKey(slot), instance)"
             :model-value="loraList(slot)"
             @update:model-value="setValue(slotKey(slot), $event)"
+            @insert-prompt="handleInsertWord"
           />
         </section>
 
@@ -1367,7 +1505,9 @@ onBeforeUnmount(() => {
         >
           <div class="field-head">
             <div class="field-heading">
-              <span class="field-glyph" aria-hidden="true">{{ slot.type === "negative" ? "−" : "＋" }}</span>
+              <span class="field-glyph" aria-hidden="true">
+                <AppIcon :name="slot.type === 'negative' ? 'minus' : 'plus'" :size="13" />
+              </span>
               <label :for="elementId(slot)">{{ slotLabel(slot) }}</label>
             </div>
             <span class="field-type">{{ typeLabel(slot.type) }}</span>
@@ -1396,7 +1536,9 @@ onBeforeUnmount(() => {
         <section v-for="slot in tileSlots" :key="slotKey(slot)" class="field-card panel">
           <div class="field-head">
             <div class="field-heading">
-              <span class="field-glyph" aria-hidden="true">🏛</span>
+              <span class="field-glyph" aria-hidden="true">
+                <AppIcon name="tiles" :size="13" />
+              </span>
               <label>{{ slotLabel(slot) }}</label>
             </div>
             <button
@@ -1405,7 +1547,8 @@ onBeforeUnmount(() => {
               type="button"
               @click="openVaultForTiles(slot)"
             >
-              预设库
+              <AppIcon name="book" :size="12" />
+              <span>预设库</span>
             </button>
           </div>
 
@@ -1426,13 +1569,13 @@ onBeforeUnmount(() => {
                 @pointerup="endTileDrag"
                 @pointercancel="endTileDrag"
               >
-                ⠿
+                <AppIcon name="drag" :size="14" />
               </button>
               <div class="tile-main">
                 <div class="tile-head">
                   <strong>{{ tile.title || tile.prompt }}</strong>
                   <button class="tile-remove" type="button" aria-label="移除磁贴" @click="removeTile(slot, index)">
-                    ✕
+                    <AppIcon name="close" :size="12" />
                   </button>
                 </div>
                 <p class="tile-prompt">{{ tile.prompt }}</p>
@@ -1443,7 +1586,8 @@ onBeforeUnmount(() => {
                     type="button"
                     @click="toggleTile(slot, index)"
                   >
-                    {{ tile.enabled === false ? "⚪ 已静音" : "🟢 已启用" }}
+                    <AppIcon name="power" :size="12" />
+                    <span>{{ tile.enabled === false ? "已静音" : "已启用" }}</span>
                   </button>
                   <div class="tile-weight">
                     <button class="step-button" type="button" @click="nudgeTile(slot, index, -TILE_WEIGHT_STEP)">
@@ -1464,7 +1608,9 @@ onBeforeUnmount(() => {
         </section>
 
         <section v-if="!promptSlots.length" class="no-slots panel">
-          <span class="field-glyph">◇</span>
+          <span class="field-glyph">
+            <AppIcon name="diamond" :size="14" />
+          </span>
           <div>
             <h3>这个模板没有提示词槽位</h3>
             <p>仍然可以直接生成，参数会沿用工作流里的默认值。</p>
@@ -1479,16 +1625,11 @@ onBeforeUnmount(() => {
         >
           <summary>
             <span class="summary-left">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M5 7h14M5 12h14M5 17h14" />
-                <circle cx="9" cy="7" r="2" />
-                <circle cx="15" cy="12" r="2" />
-                <circle cx="10" cy="17" r="2" />
-              </svg>
+              <AppIcon name="sliders" :size="15" />
               高级参数
               <span class="count-chip">{{ advancedSlots.length }}</span>
             </span>
-            <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg>
+            <AppIcon class="chevron" name="chevronDown" :size="15" />
           </summary>
 
           <div class="advanced-body">
@@ -1511,7 +1652,9 @@ onBeforeUnmount(() => {
                   @input="onNumberInput(slot, $event)"
                   @blur="onNumberBlur(slot)"
                 />
-                <button class="dice-button" type="button" title="随机种子" @click="randomizeSeed(slot)">🎲</button>
+                <button class="dice-button" type="button" title="随机种子" aria-label="随机种子" @click="randomizeSeed(slot)">
+                  <AppIcon name="dice" :size="18" />
+                </button>
               </div>
               <p v-if="slot.type === 'seed'" class="param-hint">-1 时由服务端在入队前随机化</p>
 
@@ -1602,17 +1745,19 @@ onBeforeUnmount(() => {
         <section class="action-panel panel">
           <button
             class="generate-button"
+            :class="{ 'is-stop': state.generating }"
             type="button"
-            :disabled="state.generating || !state.hasTemplate"
-            :aria-busy="state.generating"
-            @click="generate"
+            :disabled="state.stopping || (!state.hasTemplate && !state.generating)"
+            :aria-busy="state.generating && !state.stopping"
+            @click="state.generating ? stopGeneration() : generate()"
           >
-            <span v-if="state.generating" class="spinner" aria-hidden="true"></span>
-            <svg v-else viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8" />
-            </svg>
-            <span>{{ state.generating ? "生成中…" : "生成" }}</span>
-            <span class="generate-sub">{{ state.generating ? "PROCESSING" : "GENERATE" }}</span>
+            <span v-if="state.stopping" class="spinner" aria-hidden="true"></span>
+            <AppIcon v-else-if="state.generating" name="stop" :size="18" />
+            <AppIcon v-else name="sparkle" :size="19" />
+            <span>{{ state.stopping ? "正在停止…" : state.generating ? "停止生成" : "生成" }}</span>
+            <span class="generate-sub">
+              {{ state.stopping ? "STOPPING" : state.generating ? "STOP" : "GENERATE" }}
+            </span>
           </button>
 
           <div v-if="state.generating" class="progress-block" aria-live="polite">
@@ -1650,14 +1795,10 @@ onBeforeUnmount(() => {
               <span class="output-tag">OUTPUT</span>
               <div class="image-actions">
                 <a :href="state.image.url" target="_blank" rel="noopener" title="在新窗口打开" aria-label="在新窗口打开">
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M14 5h5v5M19 5l-8 8M19 14v5H5V5h5" />
-                  </svg>
+                  <AppIcon name="external" :size="16" />
                 </a>
                 <a :href="state.image.url" :download="state.image.filename" title="下载图片" aria-label="下载图片">
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M12 4v11M8 11l4 4 4-4M5 19h14" />
-                  </svg>
+                  <AppIcon name="download" :size="16" />
                 </a>
               </div>
             </div>
@@ -1683,12 +1824,43 @@ onBeforeUnmount(() => {
     </main>
 
     <transition name="toast">
-      <div v-if="state.toast" class="toast" :class="state.toast.type" role="status">
-        {{ state.toast.message }}
+      <div
+        v-if="state.toast"
+        class="toast"
+        :class="[
+          state.toast.type,
+          { 'toast-top': state.vaultSheet || state.workflowDrawer || state.drawer },
+        ]"
+        role="status"
+      >
+        <AppIcon
+          v-if="state.toast.type === 'success'"
+          name="check"
+          :size="14"
+          :stroke-width="2"
+        />
+        <AppIcon
+          v-else-if="state.toast.type === 'error'"
+          name="warning"
+          :size="14"
+          :stroke-width="1.8"
+        />
+        <span>{{ state.toast.message }}</span>
       </div>
     </transition>
 
-    <LoraModalFrame :open="state.loraFrame" @close="closeLoraFrame" />
+    <WorkflowSwitcher
+      :open="state.workflowDrawer"
+      :workflows="workflowList"
+      :active-id="state.workflowActiveId"
+      :active-title="state.hasTemplate ? title : ''"
+      :loading="state.workflowLoading"
+      :busy-id="state.workflowBusyId"
+      :error="state.workflowError"
+      @close="closeWorkflowDrawer"
+      @switch="handleSwitchWorkflow"
+      @refresh="refreshWorkflows"
+    />
 
     <PromptVaultSheet
       :open="state.vaultSheet"
@@ -1710,7 +1882,7 @@ onBeforeUnmount(() => {
               <h2>{{ state.hasTemplate ? title : "还没有模板" }}</h2>
             </div>
             <button class="icon-button" type="button" aria-label="关闭菜单" @click="closeDrawer">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+              <AppIcon name="close" :size="16" />
             </button>
           </div>
 
@@ -1748,20 +1920,24 @@ onBeforeUnmount(() => {
           <div class="drawer-section">
             <h3>操作</h3>
             <div class="drawer-actions">
+              <button type="button" @click="openWorkflowDrawer">
+                <AppIcon name="folder" :size="16" />
+                切换工作流
+              </button>
               <button type="button" @click="refreshTemplate(true)">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7M20 4v7h-7" /></svg>
+                <AppIcon name="refresh" :size="16" />
                 重新读取模板
               </button>
               <button v-if="slots.length" type="button" @click="resetTemplateValues">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.7M4 4v7h7" /></svg>
+                <AppIcon name="reset" :size="16" />
                 恢复模板默认值
               </button>
               <button type="button" @click="copyPageLink">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1" /></svg>
+                <AppIcon name="share" :size="16" />
                 分享本页地址
               </button>
               <button v-if="state.canInstall" type="button" @click="installApp">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M8 11l4 4 4-4M5 19h14" /></svg>
+                <AppIcon name="download" :size="16" />
                 安装到主屏幕
               </button>
             </div>

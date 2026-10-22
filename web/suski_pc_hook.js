@@ -406,21 +406,56 @@ function nodeMenuItems(node) {
   const submenu = widgets.map((widget) => {
     const bound = slots.some((slot) => slot.field === widget.name);
     return {
-      content: `${bound ? "✅" : "▫️"} ${widgetLabel(node, widget)}`,
+      content: `${bound ? "✓" : "·"} ${widgetLabel(node, widget)}`,
       callback: () => setSlot(node, widget, !bound),
     };
   });
   if (submenu.length === 0) submenu.push({ content: "此节点没有可绑定输入", disabled: true });
 
-  const items = [{ content: "\uD83D\uDCF1 suski 移动端槽位", has_submenu: true, submenu: { options: submenu } }];
+  const items = [{ content: "suski 移动端槽位", has_submenu: true, submenu: { options: submenu } }];
   if (isOutputNode(node)) {
     const isCurrent = String(config?.output_node_id) === String(node.id);
     items.push({
-      content: isCurrent ? "\uD83C\uDFAF 取消 suski 主输出" : "\uD83C\uDFAF 设为 suski 主输出",
+      content: isCurrent ? "取消 suski 主输出" : "设为 suski 主输出",
       callback: () => (isCurrent ? clearOutputNode() : setOutputNode(node)),
     });
   }
   return items;
+}
+
+// 画布角标用矢量路径绘制：手机=槽位节点，准星=主输出节点。
+function drawPhoneBadge(ctx, cx, cy, size) {
+  const width = size * 0.64;
+  const height = size;
+  const radius = Math.max(1.4, size * 0.15);
+  ctx.beginPath();
+  ctx.roundRect(cx - width / 2, cy - height / 2, width, height, radius);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx - size * 0.11, cy - height / 2 + size * 0.16);
+  ctx.lineTo(cx + size * 0.11, cy - height / 2 + size * 0.16);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cy + height / 2 - size * 0.14, Math.max(0.5, size * 0.05), 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawTargetBadge(ctx, cx, cy, size) {
+  const radius = size * 0.3;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cy, Math.max(0.6, size * 0.075), 0, Math.PI * 2);
+  ctx.fill();
+  const inner = radius + 1.1;
+  const outer = size * 0.5;
+  for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+    ctx.beginPath();
+    ctx.moveTo(cx + dx * inner, cy + dy * inner);
+    ctx.lineTo(cx + dx * outer, cy + dy * outer);
+    ctx.stroke();
+  }
 }
 
 function drawBadge(node, ctx) {
@@ -431,8 +466,7 @@ function drawBadge(node, ctx) {
   if (!bound && !output) return;
 
   const titleHeight = globalThis.LiteGraph?.NODE_TITLE_HEIGHT ?? 30;
-  const text = `${bound ? "\uD83D\uDCF1" : ""}${output ? "\uD83C\uDFAF" : ""}`;
-  const width = text.length > 1 ? 34 : 20;
+  const width = bound && output ? 34 : 20;
   let right = 8;
   for (const button of node.title_buttons || []) {
     if (button.visible) right += button.getWidth(ctx) + 2;
@@ -448,20 +482,49 @@ function drawBadge(node, ctx) {
   ctx.roundRect(x + 0.5, y + 0.5, width - 1, 17, 6);
   ctx.fill();
   ctx.stroke();
+
+  const iconSize = 11;
+  const gap = 2;
+  const icons = [];
+  if (bound) icons.push("phone");
+  if (output) icons.push("target");
+  const total = icons.length * iconSize + (icons.length - 1) * gap;
+  let cursor = x + (width - total) / 2;
+  const centerY = y + 9;
+  ctx.strokeStyle = "#ffd7e7";
   ctx.fillStyle = "#ffd7e7";
-  ctx.font = "12px sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, x + width / 2, y + 9);
+  ctx.lineWidth = 1.1;
+  ctx.lineCap = "round";
+  for (const icon of icons) {
+    const cx = cursor + iconSize / 2;
+    if (icon === "phone") drawPhoneBadge(ctx, cx, centerY, iconSize);
+    else drawTargetBadge(ctx, cx, centerY, iconSize);
+    cursor += iconSize + gap;
+  }
   ctx.restore();
 }
 
-function domBadgeText(nodeId) {
+const DOM_BADGE_SVG = {
+  phone:
+    '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="#ffd7e7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="3" width="10" height="18" rx="2.4"/><path d="M10.5 5.6h3"/><path d="M12 18.2v.01"/></svg>',
+  target:
+    '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="#ffd7e7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="6.5"/><circle cx="12" cy="12" r="1.4" fill="#ffd7e7" stroke="none"/><path d="M12 2.6v2.4M12 19v2.4M2.6 12h2.4M19 12h2.4"/></svg>',
+};
+
+function domBadgeState(nodeId) {
   const config = peekConfig(app.graph);
-  if (!config) return "";
+  if (!config) return null;
   const bound = config.slots.some((slot) => String(slot.node_id) === String(nodeId));
   const output = String(config.output_node_id) === String(nodeId);
-  return `${bound ? "\uD83D\uDCF1" : ""}${output ? "\uD83C\uDFAF" : ""}`;
+  if (!bound && !output) return null;
+  const titles = [];
+  if (bound) titles.push("PocketNAI 槽位节点");
+  if (output) titles.push("PocketNAI 主输出节点");
+  return {
+    key: `${bound ? 1 : 0}${output ? 1 : 0}`,
+    html: `${bound ? DOM_BADGE_SVG.phone : ""}${output ? DOM_BADGE_SVG.target : ""}`,
+    title: titles.join(" · "),
+  };
 }
 
 function syncDomBadges() {
@@ -469,9 +532,9 @@ function syncDomBadges() {
   for (const header of document.querySelectorAll('[data-testid^="node-header-"]')) {
     const nodeId = header.getAttribute("data-testid")?.slice("node-header-".length);
     if (!nodeId) continue;
-    const text = domBadgeText(nodeId);
+    const state = domBadgeState(nodeId);
     let badge = header.querySelector(".suski-node-badge");
-    if (!text) {
+    if (!state) {
       badge?.remove();
       continue;
     }
@@ -479,11 +542,14 @@ function syncDomBadges() {
       badge = document.createElement("span");
       badge.className = "suski-node-badge";
       badge.style.cssText =
-        "display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;min-width:20px;height:18px;padding:0 4px;margin-left:2px;border:1px solid rgba(255,143,190,.45);border-radius:6px;background:rgba(19,21,27,.86);font:12px/1 sans-serif;pointer-events:none;user-select:none;";
+        "display:inline-flex;align-items:center;justify-content:center;gap:2px;flex:0 0 auto;min-width:20px;height:18px;padding:0 4px;margin-left:2px;border:1px solid rgba(255,143,190,.45);border-radius:6px;background:rgba(19,21,27,.86);pointer-events:none;user-select:none;";
       (header.firstElementChild || header).appendChild(badge);
     }
-    if (badge.textContent !== text) badge.textContent = text;
-    badge.title = text.includes("\uD83D\uDCF1") ? "PocketNAI 槽位节点" : "PocketNAI 主输出节点";
+    if (badge.dataset.suskiKey !== state.key) {
+      badge.dataset.suskiKey = state.key;
+      badge.innerHTML = state.html;
+    }
+    badge.title = state.title;
   }
 }
 
@@ -611,25 +677,86 @@ function scheduleSync(delay = 400) {
   }, delay);
 }
 
+// Lora-Manager 的 LoraLoaderLM 同时维护两份真值：`loras` 数组与 `text` 纯文本。
+// 文本里残留的 <lora:...> 标签会在下一次文本回调时被 mergeLoras 重新解析回数组，
+// 于是移动端删掉的 LoRA 会「复活」。这里按最终列表重建文本，直接从源头切断旧标签。
+function loraSyntaxOf(entry) {
+  const strength = Number(entry?.strength);
+  const clip = Number(entry?.clipStrength ?? entry?.strength);
+  const model = Number.isFinite(strength) ? strength : 1;
+  const clipValue = Number.isFinite(clip) ? clip : model;
+  const format = (value) => String(Number(value.toFixed(4)));
+  return model === clipValue
+    ? `<lora:${entry.name}:${format(model)}>`
+    : `<lora:${entry.name}:${format(model)}:${format(clipValue)}>`;
+}
+
+// Lora-Manager 的 text 控件是「DOM 自动补全」控件：真正的值来自内部 textarea.value。
+// 这里刻意不写 `widget.value`：新前端的 value setter 会顺带触发 callback → mergeLoras，
+// 而 mergeLoras 会丢弃不在文本里的条目，把刚静音的 LoRA 从 loras 数组里整条删掉。
+// 只写 DOM 值并广播 UI 变更事件，既刷新界面又不触发合并。
+function syncLoraTextWidget(node, entries) {
+  const text = (Array.isArray(entries) ? entries : [])
+    .filter((entry) => entry && entry.name && entry.active !== false)
+    .map(loraSyntaxOf)
+    .join(" ");
+  const textWidget = node?.inputWidget
+    || (node?.widgets || []).find((widget) => widget?.name === "text");
+  if (!textWidget) return;
+
+  const element = textWidget.inputEl;
+  if (element && typeof element === "object" && "value" in element) {
+    if (element.value === text) return;
+    element.value = text;
+    if (typeof element.dispatchEvent === "function" && typeof CustomEvent === "function") {
+      element.dispatchEvent(
+        new CustomEvent("lora-manager:autocomplete-value-changed", { detail: { value: text } }),
+      );
+    }
+    // 老前端把文本存在普通属性上时同步兜底：临时摘掉 callback，避免赋值触发合并。
+    if (textWidget.value !== text) {
+      const callback = textWidget.callback;
+      textWidget.callback = undefined;
+      try {
+        textWidget.value = text;
+      } finally {
+        textWidget.callback = callback;
+      }
+    }
+    return;
+  }
+
+  // DOM 还没挂载：写到 LiteGraph 的待应用值，控件 onMounted 时会自行套用。
+  textWidget._pendingValue = text;
+  textWidget.onSetValue?.(text);
+}
+
 function applyListValue(node, widget, type, value) {
   const list = Array.isArray(value) ? value : [];
   if (type === "lm_loras") {
     const existing = Array.isArray(widget.value) ? widget.value : [];
-    const merged = list.map((entry) => {
-      const old = existing.find((item) => item?.name === entry?.name);
-      if (old) return { ...old, ...entry };
-      return {
-        name: entry.name,
-        strength: Number(entry.strength),
-        clipStrength: Number(entry.clipStrength ?? entry.strength),
-        active: entry.active !== false,
-        expanded: false,
-        locked: false,
-        selected: false,
-      };
-    });
+    const merged = list
+      .filter((entry) => entry && typeof entry.name === "string" && entry.name)
+      .map((entry) => {
+        const old = existing.find((item) => item?.name === entry?.name);
+        if (old) return { ...old, ...entry };
+        return {
+          name: entry.name,
+          strength: Number(entry.strength),
+          clipStrength: Number(entry.clipStrength ?? entry.strength),
+          active: entry.active !== false,
+          expanded: false,
+          locked: false,
+          selected: false,
+        };
+      });
+
+    // 1. 更新结构体数组控件（真正的执行数据源）。
     widget.value = merged;
     widget.callback?.(merged);
+
+    // 2. 同步清洗并重构节点的 inputWidget / text 纯文本控件。
+    syncLoraTextWidget(node, merged);
     return merged;
   }
 

@@ -1,5 +1,6 @@
 <script setup>
 import { computed, ref, watch } from "vue";
+import AppIcon from "./AppIcon.vue";
 import {
   categoryName,
   clampTileWeight,
@@ -173,7 +174,9 @@ watch(
             <span class="eyebrow">PROMPT VAULT</span>
             <strong>提示词预设库</strong>
           </div>
-          <button class="sheet-close" type="button" aria-label="关闭预设库" @click="$emit('close')">✕</button>
+          <button class="sheet-close" type="button" aria-label="关闭预设库" @click="$emit('close')">
+            <AppIcon name="close" :size="14" />
+          </button>
         </header>
 
         <div class="sheet-search">
@@ -189,7 +192,8 @@ watch(
             :class="{ active: collectionId === collection.id }"
             @click="pickCollection(collection.id)"
           >
-            ⭐ {{ collection.name }}
+            <AppIcon name="star" :size="11" />
+            <span>{{ collection.name }}</span>
           </button>
           <button
             v-for="category in categories"
@@ -210,7 +214,11 @@ watch(
 
           <template v-else>
             <section v-if="groups.length" class="sheet-section">
-              <h3>📦 预设组合 <span class="count-chip">{{ groups.length }}</span></h3>
+              <h3>
+                <AppIcon name="box" :size="13" />
+                <span>预设组合</span>
+                <span class="count-chip">{{ groups.length }}</span>
+              </h3>
               <article v-for="group in groups" :key="group.id" class="group-row">
                 <div class="group-copy">
                   <strong>{{ group.title }}</strong>
@@ -221,7 +229,11 @@ watch(
             </section>
 
             <section class="sheet-section">
-              <h3>🏷️ 预设词条 <span class="count-chip">{{ entries.length }}</span></h3>
+              <h3>
+                <AppIcon name="tag" :size="13" />
+                <span>预设词条</span>
+                <span class="count-chip">{{ entries.length }}</span>
+              </h3>
               <div v-if="entries.length" class="entry-grid">
                 <button
                   v-for="entry in entries"
@@ -257,7 +269,9 @@ watch(
                 <span class="eyebrow">{{ categoryName(library, detail.categoryId) }}</span>
                 <strong>{{ detail.title }}</strong>
               </div>
-              <button type="button" aria-label="关闭详情" @click="detail = null">✕</button>
+              <button type="button" aria-label="关闭详情" @click="detail = null">
+                <AppIcon name="close" :size="13" />
+              </button>
             </header>
             <img
               v-if="detail.previewHash"

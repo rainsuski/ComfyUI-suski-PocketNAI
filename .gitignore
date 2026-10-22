@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .venv/
 .scratch/
+saved_workflows/
 mobile_web/node_modules/
 mobile_web/.npm-cache/
 *.log

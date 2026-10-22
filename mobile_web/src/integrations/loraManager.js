@@ -1,4 +1,3 @@
-export const LORA_LIBRARY_URL = "/loras";
 export const LORA_STEP = 0.05;
 export const LORA_MIN = -5;
 export const LORA_MAX = 5;

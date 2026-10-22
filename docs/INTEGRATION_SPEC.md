@@ -103,6 +103,12 @@ api.addEventListener("lora_code_update", () => {
 
 ### 2.4 移动端 UI/UX 实现设计
 
+> 补充（v2.1）：托盘顶部新增 `➕ 添加 LoRA 模型` 原生选择器，直接读取本机 LoRA 库与伴随元数据
+> （封面/底模/触发词/推荐权重），不再依赖 PC 端 `lora_loader.js` 在线。
+>
+> 补充（v2.2）：原生选择器已取代 iframe 方案，`🌐 打开 LoRA 资源库` 入口与 `LoraModalFrame` 已移除；
+> 「添加 LoRA」按钮移动到 LoRA 面板右上角。详见 `docs/WORKFLOW_PERSISTENCE_AND_LORA_DECOUPLING_SPEC.md`。
+
 #### 1. 顶部操作栏与入口
 在提示词或高级参数区域提供快捷入口：
 ```text

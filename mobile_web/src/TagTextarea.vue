@@ -37,7 +37,8 @@ function syncValue() {
 }
 
 // 预设库插入走这里：优先落在光标处，并补上缺失的逗号分隔。
-function insertAtCursor(text) {
+// focus=false 用于抽屉开着时的插入，避免手机键盘从遮罩后面弹出来。
+function insertAtCursor(text, { focus = true } = {}) {
   const element = textarea.value;
   const snippet = String(text || "").trim();
   if (!snippet) return;
@@ -53,7 +54,7 @@ function insertAtCursor(text) {
   const suffix = after && !/^[\s,)\]]/.test(after) ? ", " : "";
   element.value = `${before}${prefix}${snippet}${suffix}${after}`;
   const caret = (before + prefix + snippet).length;
-  element.focus();
+  if (focus) element.focus();
   element.setSelectionRange(caret, caret);
   syncValue();
 }
