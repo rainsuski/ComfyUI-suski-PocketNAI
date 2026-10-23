@@ -12,7 +12,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from aiohttp import web
 
@@ -26,7 +26,7 @@ except Exception:  # pragma: no cover - 只在没有 ComfyUI 运行时的场景�
 
 from .tag_locator import find_tags_file
 
-logger = logging.getLogger("ComfyUI-suski-PocketNAI")
+logger = logging.getLogger("ComfyUI-PocketNAI")
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 DIST_DIR = PLUGIN_ROOT / "dist"
@@ -475,7 +475,7 @@ def _clean_slot(raw: dict) -> dict:
 def _clean_config(raw: dict) -> dict:
     slots = raw.get("slots", [])
     if not isinstance(slots, list):
-        raise ValueError("suski_config.slots 必须是数组")
+        raise ValueError("pocket_config.slots 必须是数组")
 
     cleaned_slots = []
     seen = set()
@@ -692,7 +692,7 @@ def _static_file(tail: str, cache: bool) -> web.FileResponse:
     else:
         response.headers["Cache-Control"] = "no-cache"
     if target.name == "sw.js":
-        response.headers["Service-Worker-Allowed"] = "/suski/"
+        response.headers["Service-Worker-Allowed"] = "/pocket/"
     return response
 
 
@@ -726,7 +726,7 @@ class WorkflowStore:
 
         saved_workflows/
             _active.json          {"active_id": "<id>"}
-            <id>.json             {"id", "title", "api_prompt", "suski_config", "updated_at"}
+            <id>.json             {"id", "title", "api_prompt", "pocket_config", "updated_at"}
 
     `_state` 依然是运行时缓存，但重启后可以从这里恢复，移动端也能列出并切换历史工作流。
     """
@@ -758,7 +758,7 @@ class WorkflowStore:
             "id": file_id,
             "title": str(title or config.get("display_title") or file_id)[:120],
             "api_prompt": api_prompt,
-            "suski_config": config,
+            "pocket_config": config,
             "updated_at": updated_at,
         }
         with cls.lock:
@@ -777,7 +777,7 @@ class WorkflowStore:
             data = _read_json_file(path)
             if not isinstance(data, dict):
                 continue
-            config = data.get("suski_config")
+            config = data.get("pocket_config")
             if not isinstance(config, dict):
                 config = {}
             slots = config.get("slots")
@@ -833,11 +833,11 @@ class WorkflowStore:
             raise ValueError(f"工作流文件不是合法 JSON: {target.name}")
 
         api_prompt = data.get("api_prompt")
-        raw_config = data.get("suski_config")
+        raw_config = data.get("pocket_config")
         if not isinstance(api_prompt, dict):
             raise ValueError(f"工作流缺少 api_prompt: {target.name}")
         if not isinstance(raw_config, dict):
-            raise ValueError(f"工作流缺少 suski_config: {target.name}")
+            raise ValueError(f"工作流缺少 pocket_config: {target.name}")
 
         try:
             config = _clean_config(raw_config)
@@ -850,7 +850,7 @@ class WorkflowStore:
             "id": cleaned_id,
             "title": str(data.get("title") or config["display_title"])[:120],
             "api_prompt": api_prompt,
-            "suski_config": config,
+            "pocket_config": config,
             "updated_at": str(data.get("updated_at") or ""),
         }
 
@@ -878,14 +878,15 @@ def _restore_active_workflow() -> None:
         return
     if not restored:
         return
+    cfg = restored["pocket_config"]
     with _state_lock:
         _state["api_prompt"] = restored["api_prompt"]
-        _state["config"] = restored["suski_config"]
+        _state["config"] = cfg
         _state["updated_at"] = restored["updated_at"]
     logger.info(
         "PocketNAI 已恢复活跃工作流「%s」（%d 个槽位）",
-        restored["suski_config"]["display_title"],
-        len(restored["suski_config"]["slots"]),
+        cfg["display_title"],
+        len(cfg["slots"]),
     )
 
 
@@ -921,7 +922,7 @@ def _lora_identifier(name: str) -> str:
 
 
 def _lora_preview_url(preview_rel: str) -> str:
-    return f"/suski/api/lora_preview?name={quote(preview_rel)}"
+    return f"/pocket/api/lora_preview?name={quote(preview_rel)}"
 
 
 def _first_text(value) -> str | None:
@@ -1105,18 +1106,27 @@ def _build_lora_list() -> list:
 def register_routes():
     routes = PromptServer.instance.routes
 
-    @routes.get("/suski/api/config")
+    def _route(method: str, suffix: str):
+        """统一的 /pocket 命名空间注册器，避免逐个写装饰器时漏改前缀。"""
+
+        def decorator(handler):
+            routes.route(method, f"/pocket{suffix}")(handler)
+            return handler
+
+        return decorator
+
+    @_route("GET", "/api/config")
     async def get_config(request: web.Request):
         return await _config_response()
 
-    @routes.get("/suski/api/integrations")
+    @_route("GET", "/api/integrations")
     async def get_integrations(request: web.Request):
         registered = {resource.canonical for resource in PromptServer.instance.app.router.resources()}
         return web.json_response(
             {name: path in registered for name, path in INTEGRATION_ROUTES.items()}
         )
 
-    @routes.get("/suski/api/workflows")
+    @_route("GET", "/api/workflows")
     async def get_workflows(request: web.Request):
         with _state_lock:
             current_title = _state["config"].get("display_title") if _state["config"] else None
@@ -1131,7 +1141,7 @@ def register_routes():
             }
         )
 
-    @routes.post("/suski/api/workflows/switch")
+    @_route("POST", "/api/workflows/switch")
     async def switch_workflow(request: web.Request):
         try:
             data = await request.json()
@@ -1151,12 +1161,11 @@ def register_routes():
         except ValueError as err:
             return _error("工作流数据损坏", details=str(err))
 
-        config = workflow["suski_config"]
+        config = workflow["pocket_config"]
         with _state_lock:
             _state["api_prompt"] = workflow["api_prompt"]
             _state["config"] = config
             _state["updated_at"] = workflow["updated_at"]
-            # 锁内重写活动项指针，确保最后一个拿到锁的操作同时决定 state 与 _active.json。
             try:
                 WorkflowStore.mark_active(workflow["id"])
             except OSError:
@@ -1167,14 +1176,12 @@ def register_routes():
             config["display_title"],
             len(config["slots"]),
         )
-        PromptServer.instance.send_sync(
-            "suski:template_synced",
-            {
-                "title": config["display_title"],
-                "slots": len(config["slots"]),
-                "updated_at": workflow["updated_at"],
-            },
-        )
+        sync_payload = {
+            "title": config["display_title"],
+            "slots": len(config["slots"]),
+            "updated_at": workflow["updated_at"],
+        }
+        PromptServer.instance.send_sync("pocket:template_synced", sync_payload)
         return web.json_response(
             {
                 "ok": True,
@@ -1185,7 +1192,7 @@ def register_routes():
             }
         )
 
-    @routes.get("/suski/api/loras")
+    @_route("GET", "/api/loras")
     async def list_available_loras(request: web.Request):
         if request.query.get("refresh"):
             with _lora_meta_lock:
@@ -1193,7 +1200,7 @@ def register_routes():
         items = await asyncio.to_thread(_build_lora_list)
         return web.json_response({"ok": True, "loras": items})
 
-    @routes.get("/suski/api/lora_preview")
+    @_route("GET", "/api/lora_preview")
     async def serve_lora_preview(request: web.Request):
         name = str(request.query.get("name") or "").strip()
         if not name or folder_paths is None:
@@ -1212,7 +1219,7 @@ def register_routes():
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-    @routes.post("/suski/api/sync_template")
+    @_route("POST", "/api/sync_template")
     async def sync_template(request: web.Request):
         try:
             data = await request.json()
@@ -1222,16 +1229,16 @@ def register_routes():
             return _error("请求体必须是 JSON 对象")
 
         api_prompt = data.get("api_prompt")
-        raw_config = data.get("suski_config")
+        raw_config = data.get("pocket_config")
         if not isinstance(api_prompt, dict):
             return _error("api_prompt 必须是对象")
         if not isinstance(raw_config, dict):
-            return _error("suski_config 必须是对象")
+            return _error("pocket_config 必须是对象")
 
         try:
             config = _clean_config(raw_config)
         except ValueError as err:
-            return _error("suski_config 格式错误", details=str(err))
+            return _error("pocket_config 格式错误", details=str(err))
 
         updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         api_copy = copy.deepcopy(api_prompt)
@@ -1239,7 +1246,6 @@ def register_routes():
             _state["api_prompt"] = api_copy
             _state["config"] = config
             _state["updated_at"] = updated_at
-            # 落盘与 _state 在同一临界区：切换工作流的活动项指针不会和写回交错。
             workflow_id = _store_workflow_safely(api_copy, config, updated_at)
 
         logger.info(
@@ -1247,14 +1253,12 @@ def register_routes():
             config["display_title"],
             len(config["slots"]),
         )
-        PromptServer.instance.send_sync(
-            "suski:template_synced",
-            {
-                "title": config["display_title"],
-                "slots": len(config["slots"]),
-                "updated_at": updated_at,
-            },
-        )
+        sync_payload = {
+            "title": config["display_title"],
+            "slots": len(config["slots"]),
+            "updated_at": updated_at,
+        }
+        PromptServer.instance.send_sync("pocket:template_synced", sync_payload)
         return web.json_response(
             {
                 "ok": True,
@@ -1265,7 +1269,7 @@ def register_routes():
             }
         )
 
-    @routes.post("/suski/api/apply_slots")
+    @_route("POST", "/api/apply_slots")
     async def apply_slots(request: web.Request):
         try:
             data = await request.json()
@@ -1333,7 +1337,7 @@ def register_routes():
                 len(skipped),
                 "；".join(skipped[:6]),
             )
-        PromptServer.instance.send_sync("suski:apply_slots", {"slots_data": plain_updates})
+        PromptServer.instance.send_sync("pocket:apply_slots", {"slots_data": plain_updates})
         return web.json_response(
             {
                 "ok": True,
@@ -1344,18 +1348,16 @@ def register_routes():
             }
         )
 
-    @routes.get("/suski/api/tags.csv")
+    @_route("GET", "/api/tags.csv")
     async def get_tags(request: web.Request):
         path = find_tags_file()
         if not path.is_file():
             return _error("找不到 Danbooru 词库", status=404)
-        # FileResponse 自带 ETag / Last-Modified，重复访问只回 304，同时避免
-        # 每次请求都把整个词库读进内存。
         response = web.FileResponse(path)
         response.headers["Cache-Control"] = "no-cache"
         return response
 
-    @routes.post("/suski/api/execute")
+    @_route("POST", "/api/execute")
     async def execute(request: web.Request):
         try:
             data = await request.json()
@@ -1403,8 +1405,6 @@ def register_routes():
         with _state_lock:
             number = server.number
             server.number += 1
-            # ComfyUI's execution loop consumes (number, prompt_id, prompt,
-            # extra_data, outputs, sensitive).
             server.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs, {}))
 
         logger.info("PocketNAI 已提交任务 %s（模板「%s」）", prompt_id, config["display_title"])
@@ -1417,13 +1417,8 @@ def register_routes():
             }
         )
 
-    @routes.post("/suski/api/cancel")
+    @_route("POST", "/api/cancel")
     async def cancel_generation(request: web.Request):
-        """停止生成：中断正在执行的任务，并把它从等待队列里移除。
-
-        优先使用 ComfyUI 的原子接口 `PromptQueue.interrupt_if_running`，避免中断信号
-        落到已经接替执行的另一条任务上；老版本没有该接口时退回全局中断。
-        """
         try:
             data = await request.json()
         except (json.JSONDecodeError, ValueError):
@@ -1443,7 +1438,7 @@ def register_routes():
             if callable(interrupt):
                 interrupted = bool(interrupt(prompt_id))
             else:
-                import nodes  # 旧版本回退：只能全局中断
+                import nodes
 
                 nodes.interrupt_processing()
                 interrupted = True
@@ -1474,15 +1469,15 @@ def register_routes():
             }
         )
 
-    @routes.get("/suski")
-    @routes.get("/suski/")
-    async def mobile_index(request: web.Request):
+    @routes.get("/pocket")
+    @routes.get("/pocket/")
+    async def pocket_index(request: web.Request):
         if not (DIST_DIR / "index.html").is_file():
             return _missing_build_response()
         return _static_file("index.html", cache=False)
 
-    @routes.get("/suski/{tail:.*}")
-    async def mobile_static(request: web.Request):
+    @routes.get("/pocket/{tail:.*}")
+    async def pocket_static(request: web.Request):
         tail = request.match_info.get("tail", "")
         if tail.startswith("api/"):
             return _error("接口不存在", status=404)

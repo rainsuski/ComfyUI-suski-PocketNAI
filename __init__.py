@@ -2,7 +2,7 @@ import logging
 
 from .backend.routes import register_routes
 
-logger = logging.getLogger("ComfyUI-suski-PocketNAI")
+logger = logging.getLogger("ComfyUI-PocketNAI")
 
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}

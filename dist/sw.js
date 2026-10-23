@@ -1,9 +1,9 @@
-const CACHE = "suski-pna-v2.0.1";
+const CACHE = "pocket-pna-v2.1.0";
 const SHELL = [
-  "/suski/",
-  "/suski/manifest.webmanifest",
-  "/suski/icons/icon-192.png",
-  "/suski/icons/icon-512.png",
+  "/pocket/",
+  "/pocket/manifest.webmanifest",
+  "/pocket/icons/icon-192.png",
+  "/pocket/icons/icon-512.png",
 ];
 
 self.addEventListener("install", (event) => {
@@ -28,10 +28,10 @@ async function networkFirst(request) {
   const cache = await caches.open(CACHE);
   try {
     const response = await fetch(request);
-    if (response.ok) await cache.put("/suski/", response.clone());
+    if (response.ok) await cache.put("/pocket/", response.clone());
     return response;
   } catch {
-    return (await cache.match(request)) || (await cache.match("/suski/"));
+    return (await cache.match(request)) || (await cache.match("/pocket/"));
   }
 }
 
@@ -49,8 +49,8 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-  if (!url.pathname.startsWith("/suski/")) return;
-  if (url.pathname.startsWith("/suski/api/") || url.pathname === "/suski/sw.js") return;
+  if (!url.pathname.startsWith("/pocket/")) return;
+  if (url.pathname.startsWith("/pocket/api/") || url.pathname === "/pocket/sw.js") return;
 
   if (request.mode === "navigate") {
     event.respondWith(networkFirst(request));

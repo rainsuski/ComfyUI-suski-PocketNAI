@@ -18,8 +18,8 @@ defineEmits(["vault", "copy", "clear"]);
       <AppIcon name="copy" :size="13" />
       <span>复制</span>
     </button>
-    <button type="button" @click="$emit('clear')">
-      <AppIcon name="clear" :size="13" />
+    <button class="clear-button" type="button" @click="$emit('clear')">
+      <AppIcon name="trash" :size="12" />
       <span>清空</span>
     </button>
   </div>

@@ -66,7 +66,7 @@ function menuItem(item) {
     .replaceAll("\u0001", "<mark>")
     .replaceAll("\u0002", "</mark>");
   const count = formatTagCount(item.original?.count);
-  return `<div class="suski-tag-row"><span class="suski-tag-name">${tag}</span>${count ? `<span class="suski-tag-count">${count}</span>` : ""}</div>`;
+  return `<div class="pocket-tag-row"><span class="pocket-tag-name">${tag}</span>${count ? `<span class="pocket-tag-count">${count}</span>` : ""}</div>`;
 }
 
 function setValues(tags) {
@@ -135,7 +135,7 @@ function onInput() {
   <textarea
     :id="id"
     ref="textarea"
-    class="suski-prompt-input"
+    class="pocket-prompt-input"
     :placeholder="placeholder"
     :rows="minRows"
     spellcheck="false"

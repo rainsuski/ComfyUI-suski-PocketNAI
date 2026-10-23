@@ -5,4 +5,6 @@ __pycache__/
 saved_workflows/
 mobile_web/node_modules/
 mobile_web/.npm-cache/
+.pnpm-store/
+_shots/
 *.log

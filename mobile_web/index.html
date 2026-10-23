@@ -7,21 +7,39 @@
       content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
     />
     <meta name="theme-color" content="#0b0d12" />
-    <meta name="color-scheme" content="dark" />
-    <meta name="description" content="ComfyUI-suski-PocketNAI 移动端极简控制器" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="description" content="ComfyUI-PocketNAI 移动端极简控制器" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="PocketNAI" />
-    <link rel="manifest" href="/suski/manifest.webmanifest" />
-    <link rel="icon" type="image/png" sizes="192x192" href="/suski/icons/icon-192.png" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/suski/icons/apple-touch-icon.png" />
+    <link rel="manifest" href="/pocket/manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/pocket/icons/icon-192.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/pocket/icons/apple-touch-icon.png" />
     <title>PocketNAI</title>
     <style>
       html {
         background: #080a0e;
       }
     </style>
+    <script>
+      // 在首屏绘制前应用已保存的主题与明暗模式，避免闪白/闪黑。
+      (function () {
+        try {
+          var theme = localStorage.getItem("pocketnai-theme") || "sakura";
+          var appearance = localStorage.getItem("pocketnai-appearance") || "dark";
+          var root = document.documentElement;
+          root.setAttribute("data-theme", theme);
+          root.setAttribute("data-appearance", appearance);
+          root.style.colorScheme = appearance;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute("content", appearance === "light" ? "#fcf7fa" : "#0b0d12");
+        } catch (error) {
+          document.documentElement.setAttribute("data-theme", "sakura");
+          document.documentElement.setAttribute("data-appearance", "dark");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

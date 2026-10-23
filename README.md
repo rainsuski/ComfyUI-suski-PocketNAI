@@ -1,25 +1,28 @@
-# ComfyUI-suski-PocketNAI
+# ComfyUI-PocketNAI
 
 基于「槽位注入」的 ComfyUI 移动端极简控制器。PC 端把工作流里的任意输入控件绑定成槽位，移动端只负责填写这些槽位，然后调用 ComfyUI 原生队列执行。
 
 ## 功能
 
-- PC 画布节点右键菜单：`suski 移动端槽位`
-- `SaveImage` / `PreviewImage` 右键：`设为 suski 主输出`
-- 槽位元数据写入工作流 `extra.suski_config`，同时同步到后端内存
+- PC 画布节点右键菜单：`手机 移动端槽位`
+- `SaveImage` / `PreviewImage` 右键：`设为 📱 主输出`
+- 槽位元数据写入工作流 `extra.pocket_config`，同时同步到后端内存
 - 子图实例上的槽位会展开为内部节点的 `targets`，注入时直接写真实 API Prompt 节点
 - 后端深拷贝 API Prompt，覆盖槽位值后交给 `execution.validate_prompt` 和原生队列
 - 生成中可一键停止：中断正在执行的任务，并把它从等待队列里移除
 - 工作流模板自动落盘到 `saved_workflows/`，ComfyUI 重启后恢复上次活动的工作流
 - 移动端可列出并切换已保存的工作流，不再依赖 PC 画布在线
-- 移动端编辑通过 `/suski/api/apply_slots` 写回 PC 画布；删除 LoRA/磁贴会同步到工作流
+- 移动端编辑通过 `/pocket/api/apply_slots` 写回 PC 画布；删除 LoRA/磁贴会同步到工作流
 - 删除 LoRA 时同时重建 PC 节点上的 `<lora:...>` 文本，旧 LoRA 不会在下次合并时复活
 - `seed == -1` 在入队前随机化
 - 移动端为 Vue 3 + Tailwind CSS + Tribute.js PWA，图标全部为手绘线性 SVG
 - Danbooru 词库自动发现，IndexedDB 缓存
 - WebSocket 进度、执行错误、输出图片同步
 - 图片使用原生 `<img>`，移动端可长按保存
-- 移动端内置原生 LoRA 选择器：读取本地封面、底模、触发词与推荐权重，无需 PC 端 `lora_loader.js`
+- 移动端内置原生 LoRA 选择器：读取本地封面、底模、触发词与推荐权重，挂载列表支持一键清空
+- 支持 Prompt-Vault 预设磁贴拖动排序与一键清空
+- 内置 6 套主题配色（樱夜微光 / 极夜冰蓝 / 赛博霓虹 / 翡翠极光 / 落日琥珀 / 纯粹玄黑），每套都适配浅色与深色模式，本地记忆
+- 会话图库：只暂存本次 UI 生成的图片，支持多选、详情大图、提示词复用与单张 / ZIP 打包下载；不读取服务器输出目录、不持久化，刷新或关闭即销毁
 - 支持 Aaalice `ResolutionPreset` 槽位：手机端按分组选预设或直接改宽高
 - Prompt-Vault 为可选依赖，缺失时相关入口自动隐藏
 
@@ -36,26 +39,26 @@ python main.py --listen 0.0.0.0
 然后在手机浏览器打开：
 
 ```text
-http://<PC 的局域网 IP>:8188/suski/
+http://<PC 的局域网 IP>:8188/pocket/
 ```
 
 ## 使用
 
 1. 在 PC 端打开一个工作流。
-2. 右键需要交给手机的节点，进入 `suski 移动端槽位`，勾选输入控件。
-3. 右键 `SaveImage` 或 `PreviewImage`，选择 `设为 suski 主输出`。
+2. 右键需要交给手机的节点，进入 `📱 移动端槽位`，勾选输入控件。
+3. 右键 `SaveImage` 或 `PreviewImage`，选择 `设为 手机 主输出`。
 4. 保存工作流或直接点一次队列，模板会自动同步并落盘。
-5. 手机打开 `/suski/`，填写提示词和参数，点击「生成」；生成中按钮会变成「停止生成」。
+5. 手机打开 `/pocket/`，填写提示词和参数，点击「生成」；生成中按钮会变成「停止生成」。
 
-槽位绑定会随工作流保存。再次打开工作流时，PC 扩展会重新读取 `extra.suski_config` 并同步给后端。
+槽位绑定会随工作流保存。再次打开工作流时，PC 扩展会重新读取 `extra.pocket_config` 并同步给后端。
 
 模板落盘后不再依赖 PC 画布：关闭所有 PC 浏览器标签、重启 ComfyUI，手机端仍会拿到上次的模板，可以直接出图；
 点顶部标题或侧边菜单里的「切换工作流」可以列出 `saved_workflows/` 里的所有工作流并一键切换。
 
 ## 工作流持久化
 
-- 每次 `POST /suski/api/sync_template` 与 `POST /suski/api/apply_slots` 成功后，后端都会把当前
-  `api_prompt` + `suski_config` 写到 `saved_workflows/<id>.json`，并把 id 写进 `saved_workflows/_active.json`。
+- 每次 `POST /pocket/api/sync_template` 与 `POST /pocket/api/apply_slots` 成功后，后端都会把当前
+  `api_prompt` + `pocket_config` 写到 `saved_workflows/<id>.json`，并把 id 写进 `saved_workflows/_active.json`。
 - 插件加载（ComfyUI 启动）时会自动恢复活动工作流；文件损坏时按更新时间回退到下一条可用工作流。
 - id 由工作流标题规范化而来（非法字符替换、小写、截断 80 字符），同一标题的多次保存会覆盖同一个文件。
 - 切换工作流只影响服务端活动模板与移动端；PC 画布保持当前工作流，PC 再次保存/排队时会把它的模板重新推上来，
@@ -63,13 +66,13 @@ http://<PC 的局域网 IP>:8188/suski/
 
 ## 槽位类型
 
-| `type`                                                    | 来源                                                    | 移动端控件       |
-| ----------------------------------------------------------- | ------------------------------------------------------- | ---------------- |
-| `prompt` / `negative` / `text`                        | 任意文本控件                                            | 多行提示词输入   |
-| `seed` / `slider` / `number` / `toggle` / `combo` | 任意参数控件                                            | 对应参数控件     |
-| `lm_loras`                                                | `Lora Loader (LoraManager)` 的 `loras` 控件         | 已挂载 LoRA 托盘 |
-| `pv_tiles`                                                | `PromptVaultSelector` 的 `selected_tiles_data` 控件 | 预设磁贴列表     |
-| `resolution`                                             | `ResolutionPreset`（Aaalice-Nodes）的 `resolution_json` | 分辨率预设 + 宽高 |
+| `type`                                                    | 来源                                                        | 移动端控件        |
+| ----------------------------------------------------------- | ----------------------------------------------------------- | ----------------- |
+| `prompt` / `negative` / `text`                        | 任意文本控件                                                | 多行提示词输入    |
+| `seed` / `slider` / `number` / `toggle` / `combo` | 任意参数控件                                                | 对应参数控件      |
+| `lm_loras`                                                | `Lora Loader (LoraManager)` 的 `loras` 控件             | 已挂载 LoRA 托盘  |
+| `pv_tiles`                                                | `PromptVaultSelector` 的 `selected_tiles_data` 控件     | 预设磁贴列表      |
+| `resolution`                                              | `ResolutionPreset`（Aaalice-Nodes）的 `resolution_json` | 分辨率预设 + 宽高 |
 
 `lm_loras` 与 `pv_tiles` 都是对象数组，提交时会转换为节点真正读取的结构：
 
@@ -93,12 +96,12 @@ http://<PC 的局域网 IP>:8188/suski/
 - 同步模板时会按节点真实状态重新写入 `resolution_json`（`{version:1,width,height}`），
   因此不依赖 Aaalice 的 `graphToPrompt` 钩子加载顺序；服务端注入时也只改宽高，
   `alignment` / `canvasMax` 留在配置里供 PC 画布还原框选。
-- 手机端改分辨率会通过 `suski:apply_slots` 回到 `_aaaliceResolutionControl.setValue()`，
+- 手机端改分辨率会通过 `pocket:apply_slots` 回到 `_aaaliceResolutionControl.setValue()`，
   PC 画布上的下拉文字、框选和宽高输入框会一起刷新。
 
 ## 对接 Lora-Manager 与 Prompt-Vault
 
-Prompt-Vault 是可选项，移动端通过 `GET /suski/api/integrations` 探测路由是否存在，探测不到就
+Prompt-Vault 是可选项，移动端通过 `GET /pocket/api/integrations` 探测路由是否存在，探测不到就
 隐藏「预设库」入口，原生槽位不受影响。LoRA 选配只依赖本机 `models/loras` 目录，不再需要额外的
 iframe 入口。
 
@@ -121,7 +124,7 @@ LoRA 伴随文件嗅探规则（纯本地，无外网请求）：
 | 推荐权重 | `preferredWeight` / `preferred_weight` / `recommended_weight` / `weight` / `usage_tips.strength`                             |
 | 底模     | `base_model` / `baseModel`（顶层或 `civitai`、`modelVersion`、`model` 内）                                                   |
 
-`/suski/api/loras` 返回的 `name` 是相对 `models/loras` 的路径（去掉 `.safetensors` 等扩展名），
+`/pocket/api/loras` 返回的 `name` 是相对 `models/loras` 的路径（去掉 `.safetensors` 等扩展名），
 与 Lora-Manager 在 `loras` 数组里保存的写法一致；`base_name` 只保留文件名，`folder` 用于展示目录。
 元数据缺失时接口会优雅降级（`has_meta=false`、权重 1.0），不影响选用。
 
@@ -149,20 +152,20 @@ LoRA 伴随文件嗅探规则（纯本地，无外网请求）：
 
 | 路径                            | 方法 | 说明                                                         |
 | ------------------------------- | ---- | ------------------------------------------------------------ |
-| `/suski`                      | GET  | 移动端入口                                                   |
-| `/suski/api/config`           | GET  | 当前模板与 `suski_config`                                  |
-| `/suski/api/integrations`     | GET  | 探测 Prompt-Vault 是否可用                                   |
-| `/suski/api/sync_template`    | POST | 接收 `api_prompt` 与 `suski_config`，成功后落盘          |
-| `/suski/api/workflows`        | GET  | 列出已保存的工作流与当前活动项                               |
-| `/suski/api/workflows/switch` | POST | 切换活动工作流（`{"id": "<id>"}`）                         |
-| `/suski/api/loras`            | GET  | 本地 LoRA 列表 + 伴随元数据（`?refresh=1` 跳过缓存）       |
-| `/suski/api/lora_preview`     | GET  | 输出 LoRA 本地封面（`?name=<相对路径>`）                   |
-| `/suski/api/tags.csv`         | GET  | 输出当前词库文件                                             |
-| `/suski/api/apply_slots`      | POST | 把移动端编辑写回模板、落盘并广播给 PC 画布                   |
-| `/suski/api/execute`          | POST | 注入槽位、校验并入队                                         |
-| `/suski/api/cancel`           | POST | 停止生成（`{"prompt_id": "..."}`，中断执行并移出等待队列） |
+| `/pocket`                      | GET  | 移动端入口                                                   |
+| `/pocket/api/config`           | GET  | 当前模板与 `pocket_config`                                   |
+| `/pocket/api/integrations`     | GET  | 探测 Prompt-Vault 是否可用                                   |
+| `/pocket/api/sync_template`    | POST | 接收 `api_prompt` 与 `pocket_config`，成功后落盘             |
+| `/pocket/api/workflows`        | GET  | 列出已保存的工作流与当前活动项                               |
+| `/pocket/api/workflows/switch` | POST | 切换活动工作流（`{"id": "<id>"}`）                         |
+| `/pocket/api/loras`            | GET  | 本地 LoRA 列表 + 伴随元数据（`?refresh=1` 跳过缓存）       |
+| `/pocket/api/lora_preview`     | GET  | 输出 LoRA 本地封面（`?name=<相对路径>`）                   |
+| `/pocket/api/tags.csv`         | GET  | 输出当前词库文件                                             |
+| `/pocket/api/apply_slots`      | POST | 把移动端编辑写回模板、落盘并广播给 PC 画布                   |
+| `/pocket/api/execute`          | POST | 注入槽位、校验并入队                                         |
+| `/pocket/api/cancel`           | POST | 停止生成（`{"prompt_id": "..."}`，中断执行并移出等待队列） |
 
-`POST /suski/api/execute` 的负载：
+`POST /pocket/api/execute` 的负载：
 
 ```json
 {
@@ -184,17 +187,46 @@ LoRA 伴随文件嗅探规则（纯本地，无外网请求）：
 }
 ```
 
-`/suski/api/apply_slots` 使用同样的 `slots_data` 结构，只更新其中出现的槽位。移动端编辑会以 450ms debounce 写回；后端更新模板、落盘后广播 `suski:apply_slots`，PC 端把它写进真实控件并重新同步。PC 端不在线时后端模板仍会更新并落盘，下次生成使用该模板；PC 画布与工作流文件要等 PC 打开并同步后才会变化。
+`/pocket/api/apply_slots` 使用同样的 `slots_data` 结构，只更新其中出现的槽位。移动端编辑会以 450ms debounce 写回；后端更新模板、落盘后广播 `pocket:apply_slots`，PC 端把它写进真实控件并重新同步。PC 端不在线时后端模板仍会更新并落盘，下次生成使用该模板；PC 画布与工作流文件要等 PC 打开并同步后才会变化。
+
+## 主题与明暗外观
+
+移动端抽屉底部提供浅色 / 深色切换和 6 套主题配色，点击即时生效并分别写入
+`localStorage["pocketnai-appearance"]` 与 `localStorage["pocketnai-theme"]`，下次打开自动恢复：
+
+| 主题 id      | 名称     | 说明                        |
+| ------------ | -------- | --------------------------- |
+| `sakura`     | 樱夜微光 | 粉紫，默认                  |
+| `nordic`     | 极夜冰蓝 | 冷冽蓝，极简                |
+| `cyberpunk`  | 赛博霓虹 | 青 + 品红，高对比           |
+| `emerald`    | 翡翠极光 | 森绿，沉静                  |
+| `amber`      | 落日琥珀 | 暖橙，复古                  |
+| `monochrome` | 纯粹玄黑 | 反转高阶灰白，专注          |
+
+实现方式：`<html data-theme="..." data-appearance="dark|light">` 同时控制主题与明暗模式。
+`mobile_web/src/style.css` 顶部为每套主题定义了深色色板，以及对应的浅色色板；
+组件只引用语义变量（`--bg-base` / `--panel` / `--text-soft` / `--surface-rgb` / `--field-bg` 等），
+因此新增主题时补一组深色 + 浅色变量即可，不需要改组件。
+
+## 会话图库与批量下载
+
+- 入口：顶栏图片按钮、侧边菜单「本次生成图库 · 打包下载」、输出卡片工具栏。
+- 数据源：只记录本页面通过生成按钮提交并返回的结果。图片会通过本次结果的 `/view` 地址读入浏览器内存，
+  之后单张下载、详情大图与 ZIP 打包都使用内存中的 Blob；不会枚举或扫描 ComfyUI 的 output 目录、历史记录或图库接口。
+- 图库数据不写 `localStorage` / `sessionStorage` / IndexedDB / Cache Storage；刷新、关闭页面或组件卸载时
+  Blob URL 与图片数据一起释放。主题和明暗偏好是唯一写入本地存储的 UI 设置，且不包含图片。
+- ZIP 在浏览器内生成（store 模式，图片本身已压缩），支持多选打包或一次打包本次会话的全部图片。
+- 详情大图保留本次提交时的正面提示词，可一键复制或填回提示词输入框。
 
 ## 移动端开发
 
 ```bash
 cd mobile_web
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
 
-`vite.config.js` 将产物直接写入项目根目录的 `dist/`。开发预览可使用 `npm run dev`，但 `/suski/api/*` 与 `/ws` 需要由 ComfyUI 提供。
+`vite.config.js` 将产物直接写入项目根目录的 `dist/`。开发预览可使用 `pnpm run dev`，但 `/pocket/api/*` 与 `/ws` 需要由 ComfyUI 提供。
 
 ## 说明
 
@@ -202,3 +234,6 @@ npm run build
 - 移动端、词库与 LoRA 元数据请求只访问本机 ComfyUI，不包含外部网络请求、遥测或统计。
 - 同一时间只有一个活动模板。移动端可以切换活动工作流；如果 PC 端同时开着另一个工作流并保存/排队，PC 会把自己的模板重新推上来覆盖活动项。
 - `saved_workflows/` 是运行时数据，默认不纳入版本控制；删除其中某个 JSON 即可从切换列表里移除对应工作流。
+- 本版把配置字段名、事件名、URL 前缀与前端类名统一收敛到 `pocket` 命名空间（入口从旧的
+  单段路径改为 `/pocket/`），代码与前端中不再出现开发者标识。`saved_workflows/` 内的 JSON 已就地迁移；
+  若还有更早保存的工作流文件，在 PC 端重新保存一次即可自动写入新字段。

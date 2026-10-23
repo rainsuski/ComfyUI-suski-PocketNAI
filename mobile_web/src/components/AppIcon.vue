@@ -71,6 +71,24 @@ const ICONS = {
     ["circle", { cx: 8.8, cy: 10, r: 1.55 }],
     ["path", { d: "m4.8 16.6 4.6-4.6 3.5 3.5 2.6-2.6 3.7 3.7" }],
   ],
+  shield: [
+    ["path", { d: "M12 3.7 19 6.4v5.1c0 4.3-2.8 7.2-7 8.8-4.2-1.6-7-4.5-7-8.8V6.4z" }],
+    ["path", { d: "m9.2 12 1.85 1.85L14.9 9.9" }],
+  ],
+  sun: [
+    ["circle", { cx: 12, cy: 12, r: 4.1 }],
+    ["path", { d: "M12 2.8v2.1M12 19.1v2.1M4.5 4.5l1.5 1.5M18 18l1.5 1.5M2.8 12h2.1M19.1 12h2.1M4.5 19.5 6 18M18 6l1.5-1.5" }],
+  ],
+  moon: [
+    ["path", { d: "M20.1 14.3A8.4 8.4 0 0 1 9.7 3.9a8.6 8.6 0 1 0 10.4 10.4z" }],
+  ],
+  palette: [
+    ["circle", { cx: 12, cy: 12, r: 9 }],
+    ["circle", { cx: 8.5, cy: 9, r: 1.2, fill: "currentColor", stroke: "none" }],
+    ["circle", { cx: 12, cy: 7.5, r: 1.2, fill: "currentColor", stroke: "none" }],
+    ["circle", { cx: 15.5, cy: 9, r: 1.2, fill: "currentColor", stroke: "none" }],
+    ["circle", { cx: 15, cy: 14, r: 1.2, fill: "currentColor", stroke: "none" }],
+  ],
   sliders: [
     ["path", { d: "M5 7h14M5 12h14M5 17h14" }],
     ["circle", { cx: 9, cy: 7, r: 1.9 }],

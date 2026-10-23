@@ -2,8 +2,8 @@ import { api } from "/scripts/api.js";
 import { app } from "/scripts/app.js";
 
 const VERSION = "2.0.0";
-const CONFIG_KEY = "suski_config";
-const SYNC_URL = "/suski/api/sync_template";
+const CONFIG_KEY = "pocket_config";
+const SYNC_URL = "/pocket/api/sync_template";
 const DEFAULT_TITLE = "ComfyUI 工作流";
 const OUTPUT_TYPES = new Set(["SaveImage", "PreviewImage"]);
 const INTERNAL_WIDGETS = new Set(["control_after_generate", "control_before_generate"]);
@@ -616,11 +616,11 @@ function nodeMenuItems(node) {
   }));
   if (submenu.length === 0) submenu.push({ content: "此节点没有可绑定输入", disabled: true });
 
-  const items = [{ content: "suski 移动端槽位", has_submenu: true, submenu: { options: submenu } }];
+  const items = [{ content: "📱 移动端槽位", has_submenu: true, submenu: { options: submenu } }];
   if (isOutputNode(node)) {
     const isCurrent = String(config?.output_node_id) === String(node.id);
     items.push({
-      content: isCurrent ? "取消 suski 主输出" : "设为 suski 主输出",
+      content: isCurrent ? "取消 手机 主输出" : "设为 手机 主输出",
       callback: () => (isCurrent ? clearOutputNode() : setOutputNode(node)),
     });
   }
@@ -737,20 +737,20 @@ function syncDomBadges() {
     const nodeId = header.getAttribute("data-testid")?.slice("node-header-".length);
     if (!nodeId) continue;
     const state = domBadgeState(nodeId);
-    let badge = header.querySelector(".suski-node-badge");
+    let badge = header.querySelector(".pocket-node-badge");
     if (!state) {
       badge?.remove();
       continue;
     }
     if (!badge) {
       badge = document.createElement("span");
-      badge.className = "suski-node-badge";
+      badge.className = "pocket-node-badge";
       badge.style.cssText =
         "display:inline-flex;align-items:center;justify-content:center;gap:2px;flex:0 0 auto;min-width:20px;height:18px;padding:0 4px;margin-left:2px;border:1px solid rgba(255,143,190,.45);border-radius:6px;background:rgba(19,21,27,.86);pointer-events:none;user-select:none;";
       (header.firstElementChild || header).appendChild(badge);
     }
-    if (badge.dataset.suskiKey !== state.key) {
-      badge.dataset.suskiKey = state.key;
+    if (badge.dataset.pocketKey !== state.key) {
+      badge.dataset.pocketKey = state.key;
       badge.innerHTML = state.html;
     }
     badge.title = state.title;
@@ -772,8 +772,8 @@ function installDomBadgeObserver() {
 function hookSubgraphRemovals(root) {
   if (!root?.subgraphs || typeof root.subgraphs.values !== "function") return;
   for (const subgraph of root.subgraphs.values()) {
-    if (!subgraph || subgraph.__suskiRemovalHooked) continue;
-    subgraph.__suskiRemovalHooked = true;
+    if (!subgraph || subgraph.__pocketRemovalHooked) continue;
+    subgraph.__pocketRemovalHooked = true;
     const originalNodeRemoved = subgraph.onNodeRemoved;
     subgraph.onNodeRemoved = function (node) {
       const result = originalNodeRemoved?.apply(this, arguments);
@@ -786,8 +786,8 @@ function hookSubgraphRemovals(root) {
 function hookGraph(graph) {
   if (!graph) return;
   hookSubgraphRemovals(graph);
-  if (graph.__suskiHooked) return;
-  graph.__suskiHooked = true;
+  if (graph.__pocketHooked) return;
+  graph.__pocketHooked = true;
 
   const originalNodeRemoved = graph.onNodeRemoved;
   graph.onNodeRemoved = function (node) {
@@ -867,7 +867,7 @@ async function postTemplate() {
   const response = await api.fetchApi(SYNC_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ api_prompt: apiPrompt, suski_config: config }),
+    body: JSON.stringify({ api_prompt: apiPrompt, pocket_config: config }),
   });
   if (!response.ok) {
     throw new Error(`模板同步失败（HTTP ${response.status}）`);
@@ -1159,11 +1159,11 @@ function installAppHooks() {
   // 等它写完再同步模板，手机端就能拿到最新的挂载列表。
   api.addEventListener("lora_code_update", () => scheduleSync(300));
   // 手机端的编辑写回：直接改真实控件，再让正常同步把结果发回手机。
-  api.addEventListener("suski:apply_slots", handleApplySlots);
+  api.addEventListener("pocket:apply_slots", handleApplySlots);
 }
 
 app.registerExtension({
-  name: "ComfyUI.Suski.PocketNAI",
+  name: "ComfyUI.PocketNAI",
 
   async setup() {
     installAppHooks();

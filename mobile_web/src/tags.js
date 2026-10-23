@@ -65,7 +65,7 @@ export function parseTagCsv(text) {
 }
 
 export async function fetchTags() {
-  const response = await fetch("/suski/api/tags.csv", { cache: "no-cache" });
+  const response = await fetch("/pocket/api/tags.csv", { cache: "no-cache" });
   if (!response.ok) throw new Error(`词库加载失败（HTTP ${response.status}）`);
   return parseTagCsv(await response.text());
 }

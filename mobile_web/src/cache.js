@@ -1,4 +1,4 @@
-const DB_NAME = "suski-pocketnai";
+const DB_NAME = "pocketnai";
 const DB_VERSION = 1;
 const STORE_NAME = "cache";
 

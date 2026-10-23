@@ -1,6 +1,6 @@
 export const MAX_SEED = 1125899906842624;
 
-const CLIENT_KEY = "suski-pna-client-id";
+const CLIENT_KEY = "pocketnai-client-id";
 
 function createId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -57,15 +57,15 @@ async function requestJson(url, options = {}) {
 }
 
 export function getConfig() {
-  return requestJson("/suski/api/config");
+  return requestJson("/pocket/api/config");
 }
 
 export function getIntegrations() {
-  return requestJson("/suski/api/integrations");
+  return requestJson("/pocket/api/integrations");
 }
 
 export function executePrompt(slotsData) {
-  return requestJson("/suski/api/execute", {
+  return requestJson("/pocket/api/execute", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ client_id: clientId, slots_data: slotsData }),
@@ -74,7 +74,7 @@ export function executePrompt(slotsData) {
 
 // 停止生成：后端会中断正在执行的任务，并把它从等待队列里移除。
 export function cancelPrompt(promptId) {
-  return requestJson("/suski/api/cancel", {
+  return requestJson("/pocket/api/cancel", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prompt_id: promptId }),
@@ -82,7 +82,7 @@ export function cancelPrompt(promptId) {
 }
 
 export function applySlots(slotsData) {
-  return requestJson("/suski/api/apply_slots", {
+  return requestJson("/pocket/api/apply_slots", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ client_id: clientId, slots_data: slotsData }),
@@ -91,11 +91,11 @@ export function applySlots(slotsData) {
 
 // 已落盘的工作流列表（含当前活动项）。
 export function fetchWorkflows() {
-  return requestJson("/suski/api/workflows");
+  return requestJson("/pocket/api/workflows");
 }
 
 export function switchWorkflow(id) {
-  return requestJson("/suski/api/workflows/switch", {
+  return requestJson("/pocket/api/workflows/switch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id }),
@@ -104,7 +104,7 @@ export function switchWorkflow(id) {
 
 // 本地 LoRA 库 + 伴随元数据（封面 / 底模 / 触发词 / 推荐权重）。
 export function fetchAvailableLoras({ refresh = false } = {}) {
-  return requestJson(`/suski/api/loras${refresh ? "?refresh=1" : ""}`);
+  return requestJson(`/pocket/api/loras${refresh ? "?refresh=1" : ""}`);
 }
 
 export function randomSeed() {

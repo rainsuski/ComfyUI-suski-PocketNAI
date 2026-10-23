@@ -3,13 +3,13 @@ import { computed, onBeforeUnmount, onMounted, reactive, shallowRef, watch } fro
 import TagTextarea from "./TagTextarea.vue";
 import ActiveLoraTray from "./components/ActiveLoraTray.vue";
 import AppIcon from "./components/AppIcon.vue";
+import GallerySheet from "./components/GallerySheet.vue";
 import PromptToolbar from "./components/PromptToolbar.vue";
 import PromptVaultSheet from "./components/PromptVaultSheet.vue";
 import WorkflowSwitcher from "./components/WorkflowSwitcher.vue";
 import {
   ApiError,
   applySlots,
-  buildImageUrl,
   cancelPrompt,
   clientId,
   executePrompt,
@@ -21,6 +21,7 @@ import {
   randomSeed,
   switchWorkflow,
 } from "./api.js";
+import { captureGeneratedImage, disposeGallery } from "./galleryStore.js";
 import { readLoraList } from "./integrations/loraManager.js";
 import {
   TILE_WEIGHT_STEP,
@@ -36,7 +37,6 @@ import {
 } from "./integrations/promptVault.js";
 import { fetchTags, readTagCache, writeTagCache } from "./tags.js";
 
-const LAST_IMAGE_KEY = "suski-pna-last-image";
 const PROMPT_TYPES = new Set(["prompt", "negative"]);
 const LIST_TYPES = new Set(["lm_loras", "pv_tiles"]);
 const RESOLUTION_ALIGNMENTS = [8, 16, 32, 64];
@@ -51,6 +51,16 @@ const RESOLUTION_GROUPS = [
 ];
 const GENERIC_LABELS = new Set(["值", "value", "文本", "text", "字符串", "string"]);
 const WRITE_DELAY = 450;
+const THEME_KEY = "pocketnai-theme";
+const APPEARANCE_KEY = "pocketnai-appearance";
+const THEMES = [
+  { id: "sakura", label: "樱夜微光", desc: "粉紫 · 默认", dot: "#ff8fbe", darkMeta: "#0b0d12", lightMeta: "#fcf7fa" },
+  { id: "nordic", label: "极夜冰蓝", desc: "冷冽 · 极简", dot: "#38bdf8", darkMeta: "#0a0f18", lightMeta: "#f6f9fd" },
+  { id: "cyberpunk", label: "赛博霓虹", desc: "青紫 · 高对比", dot: "#00f0ff", darkMeta: "#0d0b1a", lightMeta: "#f8f5ff" },
+  { id: "emerald", label: "翡翠极光", desc: "森绿 · 沉静", dot: "#10b981", darkMeta: "#091410", lightMeta: "#f5fbf8" },
+  { id: "amber", label: "落日琥珀", desc: "暖橙 · 复古", dot: "#f59e0b", darkMeta: "#170f08", lightMeta: "#fdf9f2" },
+  { id: "monochrome", label: "纯粹玄黑", desc: "黑白 · 专注", dot: "#f5f5f5", darkMeta: "#000000", lightMeta: "#f7f7f7" },
+];
 
 const tags = shallowRef([]);
 const workflowList = shallowRef([]);
@@ -91,6 +101,9 @@ const state = reactive({
   workflowError: "",
   workflowActiveId: "",
   workflowBusyId: "",
+  gallery: false,
+  theme: "sakura",
+  appearance: "dark",
 });
 
 let configInFlight = null;
@@ -798,6 +811,22 @@ function collectSlots() {
   return data;
 }
 
+// 记录提交时的提示词，只用于本次会话图库的详情展示。
+function promptSnapshot() {
+  const prompts = [];
+  for (const slot of promptSlots.value) {
+    const raw = values[slotKey(slot)] ?? defaultValue(slot);
+    const text = String(raw ?? "").trim();
+    if (!text) continue;
+    prompts.push({ type: slot.type, label: slotLabel(slot), text });
+  }
+  return {
+    prompt: prompts.find((entry) => entry.type === "prompt")?.text || "",
+    negative: prompts.find((entry) => entry.type === "negative")?.text || "",
+    prompts,
+  };
+}
+
 function formatError(error) {
   if (error instanceof TypeError) return "无法连接 ComfyUI，请检查地址与局域网连接。";
   if (error instanceof ApiError && error.payload && typeof error.payload === "object") {
@@ -1077,6 +1106,16 @@ function openLoraPicker(slot) {
   loraTrayRefs.get(slotKey(slot))?.openPicker?.();
 }
 
+function clearLoras(slot) {
+  setValue(slotKey(slot), []);
+  showToast("已清空 LoRA 挂载列表", "info");
+}
+
+function clearTiles(slot) {
+  setValue(slotKey(slot), []);
+  showToast("已清空预设磁贴", "info");
+}
+
 async function refreshWorkflows() {
   state.workflowLoading = true;
   state.workflowError = "";
@@ -1153,33 +1192,27 @@ function clearPrompt(slot) {
   showToast("提示词已清空");
 }
 
-function restoreImage() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(LAST_IMAGE_KEY) || "null");
-    if (stored?.filename) {
-      state.image = { ...stored, url: buildImageUrl(stored) };
-    }
-  } catch {
-    // A stale local image record should not block the controller.
-  }
-}
-
-function setImage(image) {
+function setImage(image, meta = null) {
   state.image = image;
   state.imageError = false;
-  try {
-    localStorage.setItem(
-      LAST_IMAGE_KEY,
-      JSON.stringify({
-        filename: image.filename,
-        subfolder: image.subfolder,
-        type: image.type,
-        at: image.at,
-      }),
-    );
-  } catch {
-    // Storage can be unavailable in private browsing; the image is still shown.
-  }
+  // 结果会复制到页面内存的会话图库；成功后主预览也改用内存副本。
+  void captureGeneratedImage(image, meta || promptSnapshot()).then((item) => {
+    if (!item || !state.image) return;
+    if (
+      state.image.filename === image.filename
+      && state.image.subfolder === image.subfolder
+      && state.image.at === image.at
+    ) {
+      state.image = {
+        ...state.image,
+        url: item.url,
+        bytes: item.bytes,
+        width: item.width,
+        height: item.height,
+      };
+      state.imageError = false;
+    }
+  });
 }
 
 function imageFailed() {
@@ -1232,6 +1265,7 @@ function finishRun(target, errorMessage = "") {
   clearRunTimers(target);
   const promptId = target.promptId;
   const hadImage = target.image;
+  const meta = target.meta;
   run = null;
 
   state.generating = false;
@@ -1247,7 +1281,7 @@ function finishRun(target, errorMessage = "") {
   if (hadImage) {
     showToast("生成完成", "success");
   } else if (promptId) {
-    void hydrateFromHistory(promptId);
+    void hydrateFromHistory(promptId, meta);
   }
 }
 
@@ -1316,13 +1350,13 @@ function imageFromHistory(entry) {
   return null;
 }
 
-async function hydrateFromHistory(promptId) {
+async function hydrateFromHistory(promptId, meta = null) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
       const entry = await fetchHistory(promptId);
       const image = imageFromHistory(entry);
       if (image) {
-        setImage(image);
+        setImage(image, meta);
         showToast("生成完成", "success");
         return;
       }
@@ -1354,7 +1388,7 @@ function startRunPolling(target) {
       if (!entry) return;
       const image = imageFromHistory(entry);
       if (image) {
-        setImage(image);
+        setImage(image, target.meta);
         target.image = true;
       }
       if (entry.status?.status_str === "error") {
@@ -1374,6 +1408,7 @@ async function generate() {
   state.error = "";
   try {
     await flushPendingWrites();
+    const meta = promptSnapshot();
     const result = await executePrompt(collectSlots());
     if (!result?.prompt_id) throw new Error("服务端没有返回 prompt_id");
     run = {
@@ -1383,6 +1418,7 @@ async function generate() {
       finishTimer: null,
       pollTimer: null,
       pollAttempts: 0,
+      meta,
     };
     state.generating = true;
     state.stopping = false;
@@ -1404,7 +1440,7 @@ async function generate() {
 function handleSocketMessage(message) {
   if (!message || typeof message.type !== "string") return;
   const data = message.data || {};
-  if (message.type === "suski:template_synced") {
+  if (message.type === "pocket:template_synced") {
     scheduleConfigLoad();
     if (state.workflowDrawer) void refreshWorkflows();
     return;
@@ -1445,7 +1481,7 @@ function handleSocketMessage(message) {
     if (outputNodeId.value && String(data.node) !== String(outputNodeId.value)) return;
     const image = imageFromOutput(data.output);
     if (image) {
-      setImage(image);
+      setImage(image, run?.meta);
       run.image = true;
     }
     return;
@@ -1575,6 +1611,92 @@ function onInstallPrompt(event) {
   state.canInstall = true;
 }
 
+function syncMetaThemeColor() {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) return;
+  const found = THEMES.find((item) => item.id === state.theme) || THEMES[0];
+  meta.setAttribute("content", state.appearance === "light" ? found.lightMeta : found.darkMeta);
+}
+
+function applyTheme(themeId, { persist = true } = {}) {
+  const theme = THEMES.some((item) => item.id === themeId) ? themeId : "sakura";
+  state.theme = theme;
+  document.documentElement.setAttribute("data-theme", theme);
+  syncMetaThemeColor();
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      // 隐私模式下忽略持久化失败。
+    }
+  }
+}
+
+function applyAppearance(appearance, { persist = true } = {}) {
+  state.appearance = appearance === "light" ? "light" : "dark";
+  document.documentElement.setAttribute("data-appearance", state.appearance);
+  document.documentElement.style.colorScheme = state.appearance;
+  syncMetaThemeColor();
+  if (persist) {
+    try {
+      localStorage.setItem(APPEARANCE_KEY, state.appearance);
+    } catch {
+      // 隐私模式下忽略持久化失败。
+    }
+  }
+}
+
+function selectTheme(themeId) {
+  applyTheme(themeId);
+  const found = THEMES.find((item) => item.id === themeId);
+  if (found) showToast(`已切换到「${found.label}」`);
+}
+
+function setAppearance(appearance) {
+  if (state.appearance === appearance) return;
+  applyAppearance(appearance);
+  showToast(appearance === "light" ? "已切换到浅色模式" : "已切换到深色模式");
+}
+
+function toggleAppearance() {
+  setAppearance(state.appearance === "light" ? "dark" : "light");
+}
+
+function initTheme() {
+  let storedTheme = "";
+  let storedAppearance = "";
+  try {
+    storedTheme = localStorage.getItem(THEME_KEY) || "";
+    storedAppearance = localStorage.getItem(APPEARANCE_KEY) || "";
+  } catch {
+    storedTheme = "";
+    storedAppearance = "";
+  }
+  applyAppearance(storedAppearance || "dark", { persist: false });
+  applyTheme(storedTheme || "sakura", { persist: false });
+}
+
+function openGallery() {
+  state.gallery = true;
+  state.drawer = false;
+}
+
+function closeGallery() {
+  state.gallery = false;
+}
+
+function onGalleryInsertPrompt(text) {
+  const snippet = String(text || "").trim();
+  if (!snippet) return;
+  const slot = promptSlots.value.find((entry) => entry.type === "prompt") || promptSlots.value[0];
+  if (!slot) {
+    showToast("当前模板没有提示词槽位", "error");
+    return;
+  }
+  insertSnippet(slotKey(slot), snippet, { focus: false });
+  showToast("提示词已从图库填入");
+}
+
 async function installApp() {
   if (!installPrompt) return;
   const prompt = installPrompt;
@@ -1604,20 +1726,21 @@ function onOffline() {
 
 function onKeydown(event) {
   if (event.key !== "Escape") return;
-  if (state.vaultSheet) closeVaultSheet();
+  if (state.gallery) closeGallery();
+  else if (state.vaultSheet) closeVaultSheet();
   else if (state.workflowDrawer) closeWorkflowDrawer();
   else if (state.drawer) closeDrawer();
 }
 
 watch(
-  () => [state.drawer, state.vaultSheet, state.workflowDrawer],
-  ([drawer, sheet, workflows]) => {
-    document.body.classList.toggle("drawer-open", Boolean(drawer || sheet || workflows));
+  () => [state.drawer, state.vaultSheet, state.workflowDrawer, state.gallery],
+  ([drawer, sheet, workflows, gallery]) => {
+    document.body.classList.toggle("drawer-open", Boolean(drawer || sheet || workflows || gallery));
   },
 );
 
 onMounted(() => {
-  restoreImage();
+  initTheme();
   void loadConfig();
   void loadIntegrations();
   void loadTags();
@@ -1647,11 +1770,12 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
   document.removeEventListener("visibilitychange", onVisibilityChange);
   document.body.classList.remove("drawer-open");
+  disposeGallery();
 });
 </script>
 
 <template>
-  <div class="suski-app">
+  <div class="pocket-app">
     <div class="ambient ambient-one"></div>
     <div class="ambient ambient-two"></div>
 
@@ -1674,6 +1798,27 @@ onBeforeUnmount(() => {
           </button>
         </h1>
       </div>
+
+      <button
+        class="icon-button appearance-entry"
+        type="button"
+        :title="state.appearance === 'light' ? '切换到深色模式' : '切换到浅色模式'"
+        :aria-label="state.appearance === 'light' ? '切换到深色模式' : '切换到浅色模式'"
+        :aria-pressed="state.appearance === 'light'"
+        @click="toggleAppearance"
+      >
+        <AppIcon :name="state.appearance === 'light' ? 'moon' : 'sun'" :size="18" />
+      </button>
+
+      <button
+        class="icon-button gallery-entry"
+        type="button"
+        aria-label="打开本次生成图库"
+        title="本次生成图库与批量下载"
+        @click="openGallery"
+      >
+        <AppIcon name="image" :size="19" />
+      </button>
 
       <button
         class="connection-pill"
@@ -1724,7 +1869,7 @@ onBeforeUnmount(() => {
         <p class="empty-copy">在 PC 端画布上右键任意节点，把想交给手机的输入绑定成槽位。保存或排队后，模板会自动推送过来。</p>
         <ol class="empty-steps">
           <li><span>01</span>在 ComfyUI 打开工作流</li>
-          <li><span>02</span>节点右键 → suski 移动端槽位</li>
+          <li><span>02</span>节点右键 → 手机 移动端槽位</li>
           <li><span>03</span>为 SaveImage 设置主输出</li>
         </ol>
         <div class="empty-actions">
@@ -1749,10 +1894,22 @@ onBeforeUnmount(() => {
               </span>
               <label>{{ slotLabel(slot) }}</label>
             </div>
-            <button class="mini-button" type="button" @click="openLoraPicker(slot)">
-              <AppIcon name="plus" :size="12" />
-              <span>添加 LoRA</span>
-            </button>
+            <div class="field-actions">
+              <button
+                v-if="loraList(slot).length"
+                class="clear-button"
+                type="button"
+                title="清空全部 LoRA"
+                @click="clearLoras(slot)"
+              >
+                <AppIcon name="trash" :size="12" />
+                <span>清空</span>
+              </button>
+              <button class="mini-button" type="button" @click="openLoraPicker(slot)">
+                <AppIcon name="plus" :size="12" />
+                <span>添加 LoRA</span>
+              </button>
+            </div>
           </div>
           <ActiveLoraTray
             :ref="(instance) => setLoraTrayRef(slotKey(slot), instance)"
@@ -1806,15 +1963,27 @@ onBeforeUnmount(() => {
               </span>
               <label>{{ slotLabel(slot) }}</label>
             </div>
-            <button
-              v-if="state.integrations.prompt_vault"
-              class="mini-button"
-              type="button"
-              @click="openVaultForTiles(slot)"
-            >
-              <AppIcon name="book" :size="12" />
-              <span>预设库</span>
-            </button>
+            <div class="field-actions">
+              <button
+                v-if="tileValue(slot).length"
+                class="clear-button"
+                type="button"
+                title="清空全部预设磁贴"
+                @click="clearTiles(slot)"
+              >
+                <AppIcon name="trash" :size="12" />
+                <span>清空</span>
+              </button>
+              <button
+                v-if="state.integrations.prompt_vault"
+                class="mini-button"
+                type="button"
+                @click="openVaultForTiles(slot)"
+              >
+                <AppIcon name="book" :size="12" />
+                <span>预设库</span>
+              </button>
+            </div>
           </div>
 
           <div v-if="tileValue(slot).length" class="tile-list">
@@ -2109,6 +2278,9 @@ onBeforeUnmount(() => {
             <div v-if="state.image" class="image-toolbar">
               <span class="output-tag">OUTPUT</span>
               <div class="image-actions">
+                <button type="button" title="打开本次生成图库" aria-label="打开本次生成图库" @click="openGallery">
+                  <AppIcon name="image" :size="16" />
+                </button>
                 <a :href="state.image.url" target="_blank" rel="noopener" title="在新窗口打开" aria-label="在新窗口打开">
                   <AppIcon name="external" :size="16" />
                 </a>
@@ -2239,6 +2411,10 @@ onBeforeUnmount(() => {
                 <AppIcon name="folder" :size="16" />
                 切换工作流
               </button>
+              <button type="button" @click="openGallery">
+                <AppIcon name="image" :size="16" />
+                本次生成图库 · 打包下载
+              </button>
               <button type="button" @click="refreshTemplate(true)">
                 <AppIcon name="refresh" :size="16" />
                 重新读取模板
@@ -2258,6 +2434,51 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <div class="drawer-section">
+            <h3>外观模式</h3>
+            <div class="appearance-toggle" role="group" aria-label="浅色或深色外观">
+              <button
+                type="button"
+                :class="{ active: state.appearance === 'dark' }"
+                :aria-pressed="state.appearance === 'dark'"
+                @click="setAppearance('dark')"
+              >
+                <AppIcon name="moon" :size="15" />
+                <span>深色</span>
+              </button>
+              <button
+                type="button"
+                :class="{ active: state.appearance === 'light' }"
+                :aria-pressed="state.appearance === 'light'"
+                @click="setAppearance('light')"
+              >
+                <AppIcon name="sun" :size="15" />
+                <span>浅色</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="drawer-section">
+            <h3>主题配色</h3>
+            <div class="theme-selector-grid">
+              <button
+                v-for="theme in THEMES"
+                :key="theme.id"
+                class="theme-card"
+                :class="{ active: state.theme === theme.id }"
+                type="button"
+                @click="selectTheme(theme.id)"
+              >
+                <span class="theme-dot" :style="{ background: theme.dot }"></span>
+                <span class="theme-card-info">
+                  <span class="theme-card-title">{{ theme.label }}</span>
+                  <span class="theme-card-desc">{{ theme.desc }}</span>
+                </span>
+                <AppIcon v-if="state.theme === theme.id" name="check" :size="13" />
+              </button>
+            </div>
+          </div>
+
           <div class="drawer-note">
             <span class="drawer-dot"></span>
             <p>移动端地址 <strong>{{ pageHost }}</strong>。模板与词库都来自本机 ComfyUI，不会访问外部服务。</p>
@@ -2270,5 +2491,11 @@ onBeforeUnmount(() => {
         </aside>
       </div>
     </transition>
+
+    <GallerySheet
+      :open="state.gallery"
+      @update:open="state.gallery = $event"
+      @insert-prompt="onGalleryInsertPrompt"
+    />
   </div>
 </template>
