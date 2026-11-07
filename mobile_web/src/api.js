@@ -72,7 +72,6 @@ export function executePrompt(slotsData) {
   });
 }
 
-// 停止生成：后端会中断正在执行的任务，并把它从等待队列里移除。
 export function cancelPrompt(promptId) {
   return requestJson("/pocket/api/cancel", {
     method: "POST",
@@ -89,7 +88,6 @@ export function applySlots(slotsData) {
   });
 }
 
-// 已落盘的工作流列表（含当前活动项）。
 export function fetchWorkflows() {
   return requestJson("/pocket/api/workflows");
 }
@@ -102,7 +100,14 @@ export function switchWorkflow(id) {
   });
 }
 
-// 本地 LoRA 库 + 伴随元数据（封面 / 底模 / 触发词 / 推荐权重）。
+export function deleteWorkflow(id) {
+  return requestJson("/pocket/api/workflows/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+}
+
 export function fetchAvailableLoras({ refresh = false } = {}) {
   return requestJson(`/pocket/api/loras${refresh ? "?refresh=1" : ""}`);
 }
@@ -121,6 +126,39 @@ export function buildImageUrl(image) {
   return `/view?${params.toString()}`;
 }
 
+export function buildFastPreviewUrl(image) {
+  const params = new URLSearchParams({
+    filename: image.filename || "",
+    subfolder: image.subfolder || "",
+    type: image.type || "output",
+  });
+  if (image.at) params.set("t", String(image.at));
+  return `/pocket/api/preview_fast?${params.toString()}`;
+}
+
+export function buildStreamImageUrl(image) {
+  const params = new URLSearchParams({
+    filename: image.filename || "",
+    subfolder: image.subfolder || "",
+    type: image.type || "output",
+  });
+  if (image.at) params.set("t", String(image.at));
+  return `/pocket/api/view_stream?${params.toString()}`;
+}
+
+export async function fetchImageBlobUrl(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new ApiError(`HTTP ${response.status}`, response.status);
+  }
+  const blob = await response.blob();
+  return {
+    blobUrl: URL.createObjectURL(blob),
+    bytes: blob.size,
+    type: blob.type,
+  };
+}
+
 export function extractImage(output) {
   const images = Array.isArray(output?.images) ? output.images : [];
   return images.find((image) => image && image.filename) || null;
@@ -135,6 +173,8 @@ export function imageFromOutput(output) {
     subfolder: image.subfolder || "",
     type: image.type || "output",
     at,
-    url: buildImageUrl({ ...image, at }),
+    url: buildStreamImageUrl({ ...image, at }),
+    fastUrl: buildFastPreviewUrl({ ...image, at }),
+    viewUrl: buildImageUrl({ ...image, at }),
   };
 }

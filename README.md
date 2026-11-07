@@ -1,39 +1,46 @@
 # ComfyUI-PocketNAI
 
-基于「槽位注入」的 ComfyUI 移动端极简控制器。PC 端把工作流里的任意输入控件绑定成槽位，移动端只负责填写这些槽位，然后调用 ComfyUI 原生队列执行。
+基于「槽位注入」的 ComfyUI 移动端极简控制器（v2.1.0）。PC 端将画布中任意输入控件绑定为槽位并手动推送快照副本，移动端填写槽位并调用原生队列出图，实现 **PC 画布彻底解绑自由编辑**、**多采样器实时过程预览** 与 **弱网双通道渐进式传输**。
 
-## 功能
+---
 
-- PC 画布节点右键菜单：`手机 移动端槽位`
-- `SaveImage` / `PreviewImage` 右键：`设为 📱 主输出`
-- 槽位元数据写入工作流 `extra.pocket_config`，同时同步到后端内存
-- 子图实例上的槽位会展开为内部节点的 `targets`，注入时直接写真实 API Prompt 节点
-- 后端深拷贝 API Prompt，覆盖槽位值后交给 `execution.validate_prompt` 和原生队列
-- 生成中可一键停止：中断正在执行的任务，并把它从等待队列里移除
-- 工作流模板自动落盘到 `saved_workflows/`，ComfyUI 重启后恢复上次活动的工作流
-- 移动端可列出并切换已保存的工作流，不再依赖 PC 画布在线
-- 移动端编辑通过 `/pocket/api/apply_slots` 写回 PC 画布；删除 LoRA/磁贴会同步到工作流
-- 删除 LoRA 时同时重建 PC 节点上的 `<lora:...>` 文本，旧 LoRA 不会在下次合并时复活
-- `seed == -1` 在入队前随机化
-- 移动端为 Vue 3 + Tailwind CSS + Tribute.js PWA，图标全部为手绘线性 SVG
-- Danbooru 词库自动发现，IndexedDB 缓存
-- WebSocket 进度、执行错误、输出图片同步
-- 图片使用原生 `<img>`，移动端可长按保存
-- 移动端内置原生 LoRA 选择器：读取本地封面、底模、触发词与推荐权重，挂载列表支持一键清空
-- 支持 Prompt-Vault 预设磁贴拖动排序与一键清空
-- 内置 6 套主题配色（樱夜微光 / 极夜冰蓝 / 赛博霓虹 / 翡翠极光 / 落日琥珀 / 纯粹玄黑），每套都适配浅色与深色模式，本地记忆
-- 会话图库：只暂存本次 UI 生成的图片，支持多选、详情大图、提示词复用与单张 / ZIP 打包下载；不读取服务器输出目录、不持久化，刷新或关闭即销毁
-- 支持 Aaalice `ResolutionPreset` 槽位：手机端按分组选预设或直接改宽高
-- Prompt-Vault 为可选依赖，缺失时相关入口自动隐藏
+## 核心特性 (v2.1.0)
+
+- **PC 自由编辑与解绑协同**：
+  - 彻底剥离原生画布事件的自动监听。画布任意连线、调参、加减节点不再影响移动端模板。
+  - PC 现代化左侧边栏集成 PocketNAI 专属管理抽屉，一键「📱 推送当前工作流至手机」生成独立快照副本。
+  - PC 支持「📥 拉取手机端副本参数至画布」，按需反向同步移动端调好的数值与 LoRA。
+- **多采样器实时过程预览 (Live Sampler Preview)**：
+  - WebSocket 接入 ComfyUI 原生二进制预览流（TAESD / Latent2RGB），毫秒级呈现去噪演变。
+  - 动态多采样器追踪：多级采样或高清修复工作流中，实时识别并切换当前正在运行的采样器名称与步数进度。
+  - 具备原生 Blob URL 内存主动回收（GC）机制，长时间多批次生成不卡顿、不发烫。
+- **弱网高可用：双通道渐进式传输 (Dual-Channel Delivery)**：
+  - **即时清空**：点击「生成」毫秒级清空旧图与空状态，切换为「停止生成」态。
+  - **主题流光（Cyber Fluid Wave）**：排队与采样初期联动当前主题明暗配色呈现流体波纹骨架动效。
+  - **微图秒显**：出图瞬间服务端内存生成 256px WebP 低清图（~20KB）秒级回传，高斯模糊铺满。
+  - **无损流式覆盖**：底层以 Chunked 流式传输 100% 原始图片（保留完整 ComfyUI 元数据），完成后平滑淡入无缝替换微图，并自动推入图库。
+- **槽位参数分级持久化**：
+  - **高级数值与 LoRA 挂载列表**：调参修改仅持久化至该工作流对应的 JSON 副本，隔离 PC 画布。
+  - **正负面提示词与预设磁贴**：作为临时灵感仅保留在移动端会话内存态中，退出/刷新自动恢复 PC 推送时的初始状态，绝不污染长期模板。
+- **双端工作流生命周期管理**：
+  - PC 侧边栏与手机端顶部工作流抽屉均支持重命名覆盖与独立删除（带二次确认）。
+  - 活动工作流删除时后端自动安全回退至最新剩余模板并广播，防止空指针异常。
+- **完整生态与离线资产**：
+  - 内置原生 LoRA 选择器：纯本地嗅探封面、底模、触发词与推荐权重，支持一键清空与步进调权。
+  - 支持 Prompt-Vault 预设词库与磁贴拖拽排序，支持 Aaalice `ResolutionPreset` 分辨率分组预设。
+  - Danbooru 词库自动发现与 IndexedDB 缓存；会话级图库单张/ZIP批量打包下载。
+  - 内置 6 套全语义主题配色（樱夜微光 / 极夜冰蓝 / 赛博霓虹 / 翡翠极光 / 落日琥珀 / 纯粹玄黑），深浅模式自适应。
+
+---
 
 ## 安装
 
-把整个目录放入 `ComfyUI/custom_nodes/`，重启 ComfyUI。`dist/` 已包含构建后的移动端，无需在 ComfyUI 环境里安装 Node 依赖。
+把整个目录放入 `ComfyUI/custom_nodes/`，重启 ComfyUI。`dist/` 已包含构建产物，无需在 ComfyUI 环境里安装 Node 依赖。
 
-局域网访问需要让 ComfyUI 监听外部网卡，例如：
+局域网访问需要让 ComfyUI 监听外部网卡，推荐开启采样预览参数：
 
 ```bash
-python main.py --listen 0.0.0.0
+python main.py --listen 0.0.0.0 --preview-method auto
 ```
 
 然后在手机浏览器打开：
@@ -42,183 +49,99 @@ python main.py --listen 0.0.0.0
 http://<PC 的局域网 IP>:8188/pocket/
 ```
 
-## 使用
+---
 
-1. 在 PC 端打开一个工作流。
-2. 右键需要交给手机的节点，进入 `📱 移动端槽位`，勾选输入控件。
-3. 右键 `SaveImage` 或 `PreviewImage`，选择 `设为 手机 主输出`。
-4. 保存工作流或直接点一次队列，模板会自动同步并落盘。
-5. 手机打开 `/pocket/`，填写提示词和参数，点击「生成」；生成中按钮会变成「停止生成」。
+## 使用流程
 
-槽位绑定会随工作流保存。再次打开工作流时，PC 扩展会重新读取 `extra.pocket_config` 并同步给后端。
+1. **配置槽位**：在 PC 画布右键需要交给手机的节点，进入 `📱 移动端槽位` 勾选输入控件；右键 `SaveImage` 或 `PreviewImage` 选择 `设为 手机 主输出`。
+2. **推送快照**：在 PC 端左侧边栏点击 PocketNAI 手机图标，点击顶部的「📱 推送当前工作流至手机」。当前工作流即作为独立副本落盘至 `saved_workflows/`。
+3. **PC 自由操作**：推送完成后，PC 画布可随意切换工作流或自由编辑，不再影响手机端。
+4. **移动端出图**：手机端打开 `/pocket/`，选词调参，点击「生成」。生成过程中可随时点击「停止生成」中断任务。
+5. **参数拉取（可选）**：若在手机端调优了数值或 LoRA，可在 PC 侧边栏点击「📥 拉取手机端副本参数至画布」将副本参数套用回画布。
 
-模板落盘后不再依赖 PC 画布：关闭所有 PC 浏览器标签、重启 ComfyUI，手机端仍会拿到上次的模板，可以直接出图；
-点顶部标题或侧边菜单里的「切换工作流」可以列出 `saved_workflows/` 里的所有工作流并一键切换。
+---
 
-## 工作流持久化
+## 弱网优化与预览时序
 
-- 每次 `POST /pocket/api/sync_template` 与 `POST /pocket/api/apply_slots` 成功后，后端都会把当前
-  `api_prompt` + `pocket_config` 写到 `saved_workflows/<id>.json`，并把 id 写进 `saved_workflows/_active.json`。
-- 插件加载（ComfyUI 启动）时会自动恢复活动工作流；文件损坏时按更新时间回退到下一条可用工作流。
-- id 由工作流标题规范化而来（非法字符替换、小写、截断 80 字符），同一标题的多次保存会覆盖同一个文件。
-- 切换工作流只影响服务端活动模板与移动端；PC 画布保持当前工作流，PC 再次保存/排队时会把它的模板重新推上来，
-  这属于「PC 在线则协同」的预期行为。
-
-## 槽位类型
-
-| `type`                                                    | 来源                                                        | 移动端控件        |
-| ----------------------------------------------------------- | ----------------------------------------------------------- | ----------------- |
-| `prompt` / `negative` / `text`                        | 任意文本控件                                                | 多行提示词输入    |
-| `seed` / `slider` / `number` / `toggle` / `combo` | 任意参数控件                                                | 对应参数控件      |
-| `lm_loras`                                                | `Lora Loader (LoraManager)` 的 `loras` 控件             | 已挂载 LoRA 托盘  |
-| `pv_tiles`                                                | `PromptVaultSelector` 的 `selected_tiles_data` 控件     | 预设磁贴列表      |
-| `resolution`                                              | `ResolutionPreset`（Aaalice-Nodes）的 `resolution_json` | 分辨率预设 + 宽高 |
-
-`lm_loras` 与 `pv_tiles` 都是对象数组，提交时会转换为节点真正读取的结构：
-
-- `LoraLoaderLM` 在执行阶段丢弃 `text` 控件，只认 `loras` 数组，因此槽位值会整体覆盖
-  `loras`，并补上 ComfyUI 序列化数组控件所需的 `{"__value__": [...]}` 包装。
-  注入时还会顺手把同一节点上的 `text` 重建成 `<lora:name:strength[:clip]>`，让服务端模板的两份
-  真值保持一致；只改写本来就存在的字符串 `text`，不会新增输入项。
-- `selected_tiles_data` 是 JSON 字符串，后端负责序列化，权重与启用状态原样写入磁贴。
-- 绑定在子图实例上的槽位会记录 `targets`。例如 `1526/unet_name` 会写成
-  `1526:1732/model_name`，执行时只改内部真实节点；子图被删除或输入被连线时，
-  PC 端会清理槽位，后端也会跳过失效目标而不是报“节点不存在”。
-
-`resolution` 槽位对接 Aaalice-Nodes 的 `ResolutionPreset`：
-
-- 该节点没有原生 LiteGraph 控件，状态保存在 `properties.resolutionPresetState`；
-  右键菜单里的「分辨率预设」会读取 `_aaaliceResolutionControl` 的预设列表与当前状态，
-  绑定后写入 `resolution_json`。
-- PC 端以 `getPresets()` / `getValue()` 取内置与个人预设；手机端按方形、竖图、横图、
-  我的预设分组展示，也可以直接改宽高。宽高按当前对齐值（8/16/32/64）取整，
-  匹配到预设时自动回填 `presetId`，否则显示「自定义」。
-- 同步模板时会按节点真实状态重新写入 `resolution_json`（`{version:1,width,height}`），
-  因此不依赖 Aaalice 的 `graphToPrompt` 钩子加载顺序；服务端注入时也只改宽高，
-  `alignment` / `canvasMax` 留在配置里供 PC 画布还原框选。
-- 手机端改分辨率会通过 `pocket:apply_slots` 回到 `_aaaliceResolutionControl.setValue()`，
-  PC 画布上的下拉文字、框选和宽高输入框会一起刷新。
-
-## 对接 Lora-Manager 与 Prompt-Vault
-
-Prompt-Vault 是可选项，移动端通过 `GET /pocket/api/integrations` 探测路由是否存在，探测不到就
-隐藏「预设库」入口，原生槽位不受影响。LoRA 选配只依赖本机 `models/loras` 目录，不再需要额外的
-iframe 入口。
-
-### Lora-Manager
-
-1. 在 PC 端右键 `Lora Loader (LoraManager)`，把 `LoRA 挂载列表` 绑定为槽位。
-2. 手机端 LoRA 面板右上角点「添加 LoRA」，直接从本机 `models/loras` 里挑；抽屉内可搜索模型名、
-   目录、底模与触发词，卡片显示本地封面、底模徽章与推荐权重。整个流程只读本地文件，**PC 端关掉也能用**。
-3. 点触发词标签会把词条插入正面提示词（有光标时按光标位置插入）。
-4. 托盘里可直接静音、删除、按 `0.05` 步进调权，修改会立即写回 `loras` 数组和 PC 画布。
-   删除时 PC 钩子会同步重建节点上的 `text` 控件，旧 LoRA 的标签被彻底清除，之后再加新 LoRA 也不会复活。
-
-LoRA 伴随文件嗅探规则（纯本地，无外网请求）：
-
-| 类型     | 查找顺序                                                                                                                               |
-| -------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| 封面     | `<stem>.preview.png` → `.preview.jpg` → `.preview.jpeg` → `.preview.webp` → `.png` → `.jpg` → `.jpeg` → `.webp` |
-| 元数据   | `<stem>.metadata.json` → `<stem>.civitai.info` → `<stem>.json`                                                                 |
-| 触发词   | `trainedWords` / `trigger_words` / `activation_text`（顶层或 `civitai`、`modelVersion` 内）                                  |
-| 推荐权重 | `preferredWeight` / `preferred_weight` / `recommended_weight` / `weight` / `usage_tips.strength`                             |
-| 底模     | `base_model` / `baseModel`（顶层或 `civitai`、`modelVersion`、`model` 内）                                                   |
-
-`/pocket/api/loras` 返回的 `name` 是相对 `models/loras` 的路径（去掉 `.safetensors` 等扩展名），
-与 Lora-Manager 在 `loras` 数组里保存的写法一致；`base_name` 只保留文件名，`folder` 用于展示目录。
-元数据缺失时接口会优雅降级（`has_meta=false`、权重 1.0），不影响选用。
-
-### Prompt-Vault
-
-1. 提示词输入框上方的 `预设库` 打开底部抽屉，按分类/收藏筛选、搜索、长按查看详情。
-2. 点词条按光标位置插入文本（不唤起键盘，顶部会给出插入成功提示），非 1.0 权重会格式化为 `(prompt:weight)`；点组合按顺序展开。
-3. `PromptVaultSelector` 的 `selected_tiles_data` 绑定为槽位后，同一抽屉切换为磁贴模式，
-   可增删、拖动排序、静音与调权；修改会同步回真实磁贴数据。
-4. PC 端保存词库会广播 `prompt_vault:library_updated`，手机端静默刷新 IndexedDB 缓存与列表。
-
-## 词库发现顺序
-
-后端按以下顺序查找第一个有效文件：
-
-1. `custom_nodes/ComfyUI-Custom-Scripts/user/autocomplete/danbooru.csv`
-2. `custom_nodes/comfyui-custom-scripts/user/autocomplete/danbooru.csv`
-3. `custom_nodes/ComfyUI-Custom-Scripts/web/js/assets/danbooru.csv`
-4. `custom_nodes/comfyui-custom-scripts/web/js/assets/danbooru.csv`
-5. `custom_nodes/ComfyUI_tagcomplete/tags/danbooru.csv`
-6. `custom_nodes/ComfyUI-Autocomplete-Aaalice/data/danbooru_tags.csv`
-7. 内置 `backend/assets/danbooru_min.csv`（Top 5000）
-
-## API
-
-| 路径                            | 方法 | 说明                                                         |
-| ------------------------------- | ---- | ------------------------------------------------------------ |
-| `/pocket`                      | GET  | 移动端入口                                                   |
-| `/pocket/api/config`           | GET  | 当前模板与 `pocket_config`                                   |
-| `/pocket/api/integrations`     | GET  | 探测 Prompt-Vault 是否可用                                   |
-| `/pocket/api/sync_template`    | POST | 接收 `api_prompt` 与 `pocket_config`，成功后落盘             |
-| `/pocket/api/workflows`        | GET  | 列出已保存的工作流与当前活动项                               |
-| `/pocket/api/workflows/switch` | POST | 切换活动工作流（`{"id": "<id>"}`）                         |
-| `/pocket/api/loras`            | GET  | 本地 LoRA 列表 + 伴随元数据（`?refresh=1` 跳过缓存）       |
-| `/pocket/api/lora_preview`     | GET  | 输出 LoRA 本地封面（`?name=<相对路径>`）                   |
-| `/pocket/api/tags.csv`         | GET  | 输出当前词库文件                                             |
-| `/pocket/api/apply_slots`      | POST | 把移动端编辑写回模板、落盘并广播给 PC 画布                   |
-| `/pocket/api/execute`          | POST | 注入槽位、校验并入队                                         |
-| `/pocket/api/cancel`           | POST | 停止生成（`{"prompt_id": "..."}`，中断执行并移出等待队列） |
-
-`POST /pocket/api/execute` 的负载：
-
-```json
-{
-  "client_id": "uuid",
-  "slots_data": {
-    "6": { "text": "1girl, silver hair" },
-    "3": { "seed": -1, "steps": 28 },
-    "12": {
-      "loras": [
-        { "name": "anime_eyes_v1", "strength": 0.85, "clipStrength": 0.85, "active": true }
-      ]
-    },
-    "20": {
-      "selected_tiles_data": [
-        { "instance_id": "t1", "title": "逆光", "prompt": "backlight", "weight": 1.2, "enabled": true }
-      ]
-    }
-  }
-}
+```text
+Mobile (手机端)              Backend (后端)             ComfyUI Core (内核)
+   │                           │                             │
+   ├─ 1. 点击生成 ────────────>│                             │
+   │  (即时清空, 激活流光波纹) │                             │
+   │                           ├─ 2. 校验注入并推入队列 ────>│
+   │                           │                             │
+   │<─ 3. WS: 二进制采样帧 ────┼────────(去噪迭代)───────────┤
+   │  (动态呈现当前采样器预览)  │                             │
+   │                           │<─ 4. 执行完毕产出无损图 ────┤
+   │                           │                             │
+   │<─ 5. /api/preview_fast ───┤ (内存动态裁切 256px WebP)   │
+   │  (秒出高斯模糊占位)       │                             │
+   │                           │                             │
+   │<─ 6. /api/view_stream ────┤ (Chunked 原图分块流)        │
+   │  (200ms 淡入覆盖, 入库)   │                             │
 ```
 
-`/pocket/api/apply_slots` 使用同样的 `slots_data` 结构，只更新其中出现的槽位。移动端编辑会以 450ms debounce 写回；后端更新模板、落盘后广播 `pocket:apply_slots`，PC 端把它写进真实控件并重新同步。PC 端不在线时后端模板仍会更新并落盘，下次生成使用该模板；PC 画布与工作流文件要等 PC 打开并同步后才会变化。
+---
 
-## 主题与明暗外观
+## 槽位类型与分级持久化
 
-移动端抽屉底部提供浅色 / 深色切换和 6 套主题配色，点击即时生效并分别写入
-`localStorage["pocketnai-appearance"]` 与 `localStorage["pocketnai-theme"]`，下次打开自动恢复：
+| 槽位类型 (`type`) | 适用来源 | 移动端交互形态 | 持久化策略 |
+| :--- | :--- | :--- | :--- |
+| `prompt` / `negative` | 文本编码节点 | 多行提示词输入 + 词库补全 + 快捷工具栏 | **会话内存态**（退出即弃，不污染磁盘副本） |
+| `pv_tiles` | `PromptVaultSelector` | 预设磁贴列表（拖动排序、权重微调、静音） | **会话内存态**（仅在生成上下文中生效） |
+| `seed` | 种子控件 | 数值输入 + 骰子随机化（`-1` 入队前随机化） | 持久化至工作流 JSON 副本 |
+| `slider` / `number` | 数值、步数、CFG | 滑杆拖动或数值输入 | 持久化至工作流 JSON 副本 |
+| `toggle` / `combo` | 开关、采样器、调度器 | 原生 Switch 开关或下拉选择 | 持久化至工作流 JSON 副本 |
+| `lm_loras` | `Lora Loader (LoraManager)` | 已挂载 LoRA 托盘（调权、静音、剔除、选择器） | 持久化至工作流 JSON 副本 |
+| `resolution` | `ResolutionPreset` (Aaalice) | 分组预设下拉选择 + 像素对齐微调 | 持久化至工作流 JSON 副本 |
 
-| 主题 id      | 名称     | 说明                        |
-| ------------ | -------- | --------------------------- |
-| `sakura`     | 樱夜微光 | 粉紫，默认                  |
-| `nordic`     | 极夜冰蓝 | 冷冽蓝，极简                |
-| `cyberpunk`  | 赛博霓虹 | 青 + 品红，高对比           |
-| `emerald`    | 翡翠极光 | 森绿，沉静                  |
-| `amber`      | 落日琥珀 | 暖橙，复古                  |
-| `monochrome` | 纯粹玄黑 | 反转高阶灰白，专注          |
+---
 
-实现方式：`<html data-theme="..." data-appearance="dark|light">` 同时控制主题与明暗模式。
-`mobile_web/src/style.css` 顶部为每套主题定义了深色色板，以及对应的浅色色板；
-组件只引用语义变量（`--bg-base` / `--panel` / `--text-soft` / `--surface-rgb` / `--field-bg` 等），
-因此新增主题时补一组深色 + 浅色变量即可，不需要改组件。
+## 生态扩展集成
+
+### 1. Lora-Manager 集成
+- 手机端 LoRA 面板右上角点击「添加 LoRA」，直接检索本机 `models/loras`。
+- 本地解析伴随元数据（无需外网）：读取 `<stem>.preview.png` 封面、底模类型、推荐权重与触发词。
+- 点击触发词可按光标位置插入正面提示词；挂载列表支持按 `0.05` 步进微调。
+
+### 2. Prompt-Vault 集成
+- 探测到 Prompt-Vault 时自动点亮「预设库」入口。
+- 支持按分类/收藏检索词条并按光标插入文本；磁贴模式下支持组合一键展开载入。
+- PC 端更新词库时通过 WebSocket 静默刷新移动端 IndexedDB 缓存。
+
+---
+
+## API 接口规范
+
+| 路径 | 方法 | 说明 |
+| :--- | :---: | :--- |
+| `/pocket` | `GET` | 移动端单页应用入口 |
+| `/pocket/api/config` | `GET` | 获取当前活动工作流模板与槽位定义 |
+| `/pocket/api/sync_template` | `POST` | PC 端手动推送当前画布快照并落盘 |
+| `/pocket/api/workflows` | `GET` | 列出已保存的工作流列表与当前活动项 |
+| `/pocket/api/workflows/switch` | `POST` | 切换活动工作流 (`{"id": "<id>"}`) |
+| `/pocket/api/workflows/delete` | `POST` | 删除已保存的工作流 (`{"id": "<id>"}`) |
+| `/pocket/api/preview_fast` | `GET` | 获取极小模糊 WebP 缩略图（`?filename=...`） |
+| `/pocket/api/view_stream` | `GET` | 获取分块流式无损原图（Chunked Transfer） |
+| `/pocket/api/apply_slots` | `POST` | 移动端非临时参数持久化写回副本（无 PC 广播） |
+| `/pocket/api/execute` | `POST` | 槽位参数注入、校验并提交执行队列 |
+| `/pocket/api/cancel` | `POST` | 停止生成（中断当前执行并清理等待队列） |
+| `/pocket/api/loras` | `GET` | 获取本机已安装的 LoRA 及解析出的元数据 |
+| `/pocket/api/lora_preview` | `GET` | 获取 LoRA 本地封面图片 |
+| `/pocket/api/tags.csv` | `GET` | 获取自动发现的 Danbooru 词库文件 |
+| `/pocket/api/integrations` | `GET` | 探测可选依赖（Prompt-Vault 等）支持情况 |
+
+---
 
 ## 会话图库与批量下载
 
-- 入口：顶栏图片按钮、侧边菜单「本次生成图库 · 打包下载」、输出卡片工具栏。
-- 数据源：只记录本页面通过生成按钮提交并返回的结果。图片会通过本次结果的 `/view` 地址读入浏览器内存，
-  之后单张下载、详情大图与 ZIP 打包都使用内存中的 Blob；不会枚举或扫描 ComfyUI 的 output 目录、历史记录或图库接口。
-- 图库数据不写 `localStorage` / `sessionStorage` / IndexedDB / Cache Storage；刷新、关闭页面或组件卸载时
-  Blob URL 与图片数据一起释放。主题和明暗偏好是唯一写入本地存储的 UI 设置，且不包含图片。
-- ZIP 在浏览器内生成（store 模式，图片本身已压缩），支持多选打包或一次打包本次会话的全部图片。
-- 详情大图保留本次提交时的正面提示词，可一键复制或填回提示词输入框。
+- **纯内存暂存**：仅记录本页面在当前会话中生成的图像。图片接收后保留在浏览器内存 Blob 中，不扫描磁盘历史，不写入任何本地持久化存储，页面关闭或刷新后立即释放。
+- **无损与元数据保留**：长按保存、单张下载以及客户端 ZIP 打包均基于 100% 原始输出流，完整保留生成参数与节点图元数据。
+- **提示词复用**：图库大图详情展示提交时的提示词文本，支持一键填回输入框。
 
-## 移动端开发
+---
+
+## 移动端二次开发
 
 ```bash
 cd mobile_web
@@ -226,14 +149,14 @@ pnpm install
 pnpm run build
 ```
 
-`vite.config.js` 将产物直接写入项目根目录的 `dist/`。开发预览可使用 `pnpm run dev`，但 `/pocket/api/*` 与 `/ws` 需要由 ComfyUI 提供。
+产物将直接编译至项目根目录的 `dist/`。开发热重载模式可使用 `pnpm run dev`（需确保后端 ComfyUI 正常运行于对应端口）。
+```
+---
 
 ## 说明
 
-- PWA 安装与 Service Worker 需要 HTTPS 或 `localhost`。局域网 HTTP 仍可正常使用页面，但浏览器不会提供安装能力。
-- 移动端、词库与 LoRA 元数据请求只访问本机 ComfyUI，不包含外部网络请求、遥测或统计。
-- 同一时间只有一个活动模板。移动端可以切换活动工作流；如果 PC 端同时开着另一个工作流并保存/排队，PC 会把自己的模板重新推上来覆盖活动项。
-- `saved_workflows/` 是运行时数据，默认不纳入版本控制；删除其中某个 JSON 即可从切换列表里移除对应工作流。
-- 本版把配置字段名、事件名、URL 前缀与前端类名统一收敛到 `pocket` 命名空间（入口从旧的
-  单段路径改为 `/pocket/`），代码与前端中不再出现开发者标识。`saved_workflows/` 内的 JSON 已就地迁移；
-  若还有更早保存的工作流文件，在 PC 端重新保存一次即可自动写入新字段。
+- **采样器实时预览依赖**：若需要在移动端实时查看采样器的去噪演变过程（Live Preview），请确保 ComfyUI 服务端未禁用预览，推荐启动参数加入 `--preview-method auto` 或 `--preview-method taesd`（若设为 `none` 则内核不会生成预览帧）。
+- **PWA 安装与离线能力**：PWA 添加至主屏幕与 Service Worker 缓存要求浏览器处于安全上下文（HTTPS 或 `localhost`）。局域网通过纯 HTTP 访问时可完全正常使用全部控制、生成与下载功能，但浏览器可能不提供安装横幅。
+- **纯本地局域网安全**：移动端通信、词库检索、LoRA 本地元数据解析及会话图库传输均仅在局域网内与 ComfyUI 服务端交互，绝不发起任何外部网络请求、遥测或第三方上报。
+- **工作流存储目录**：`saved_workflows/` 存放所有已推送的工作流 JSON 快照副本与活动指针 `_active.json`，该目录为运行时数据，默认已加入 `.gitignore`。
+- **解绑与多端并发**：PC 画布与手机端彻底解绑后，PC 端的任意编辑连线都不会影响手机端已保存的模板；若需将 PC 画布改动同步给手机，请在 PC 侧边栏主动点击「推送当前工作流至手机」覆盖或新增。

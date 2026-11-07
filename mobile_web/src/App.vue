@@ -10,9 +10,15 @@ import WorkflowSwitcher from "./components/WorkflowSwitcher.vue";
 import {
   ApiError,
   applySlots,
+  buildFastPreviewUrl,
+  buildImageUrl,
+  buildStreamImageUrl,
   cancelPrompt,
   clientId,
+  deleteWorkflow,
   executePrompt,
+  extractImage,
+  fetchImageBlobUrl,
   fetchWorkflows,
   getConfig,
   getIntegrations,
@@ -73,6 +79,7 @@ const writeTimers = new Map();
 const writeInFlight = new Map();
 const writePending = new Set();
 let lastWriteErrorAt = 0;
+
 const state = reactive({
   config: null,
   hasTemplate: false,
@@ -81,6 +88,7 @@ const state = reactive({
   connection: "connecting",
   generating: false,
   stopping: false,
+  queueNumber: null,
   progress: null,
   currentNode: null,
   error: "",
@@ -88,6 +96,11 @@ const state = reactive({
   drawer: false,
   canInstall: false,
   image: null,
+  fastPreview: null,
+  fullLoaded: false,
+  streamLoading: false,
+  samplerPreview: null,
+  activeSamplerNode: null,
   imageError: false,
   tagsStatus: "loading",
   advancedOpen: false,
@@ -141,6 +154,25 @@ const progressLabel = computed(() => {
   if (state.progress?.max) return `${state.currentNode || "采样"} · ${progressPercent.value}%`;
   return state.currentNode || "等待执行";
 });
+const fluidStatusText = computed(() => {
+  if (state.queueNumber !== null && !state.progress?.max) {
+    return `排队中 (#${state.queueNumber})`;
+  }
+  if (state.progress?.max) {
+    return `生成中 (Step ${state.progress.value}/${state.progress.max} · ${progressPercent.value}%)`;
+  }
+  return state.currentNode || "准备执行";
+});
+const fluidStatusSub = computed(() => {
+  if (state.progress?.max) {
+    return state.currentNode ? `${state.currentNode}` : null;
+  }
+  return state.queueNumber !== null ? "正在等待调度执行…" : null;
+});
+const activeSamplerLabel = computed(() => {
+  if (state.activeSamplerNode?.name) return state.activeSamplerNode.name;
+  return state.currentNode || "采样器";
+});
 const connectionLabel = computed(() => {
   if (state.connection === "online") return "已联";
   if (state.connection === "connecting") return "连接中";
@@ -185,8 +217,6 @@ function resolutionPresetMatches(preset, width, height, alignment) {
     && (preset?.group !== "personal" || Number(preset?.alignment) === alignment);
 }
 
-// 兼容旧版后端：它不认识 resolution 类型，会把槽位降级成 text，并把
-// presets/alignments 这类附加字段丢掉（PC 钩子会把它们塞进 default_val）。
 function resolutionMetadataSource(value) {
   if (typeof value === "string") {
     try {
@@ -216,16 +246,14 @@ function prepareSlot(slot) {
 
 function outgoingSlotValue(slot, value) {
   if (!slot?._resolutionLegacy) return value;
-  const state = normalizeResolution(slot, value);
-  // 旧后端按 text 处理，只把字符串原样写进 resolution_json；附带元数据
-  // 让下一次加载仍能恢复预设列表，Aaalice 本身只读取 width/height。
+  const resState = normalizeResolution(slot, value);
   return JSON.stringify({
     version: 1,
-    width: state.width,
-    height: state.height,
-    alignment: state.alignment,
-    canvasMax: state.canvasMax,
-    presetId: state.presetId,
+    width: resState.width,
+    height: resState.height,
+    alignment: resState.alignment,
+    canvasMax: resState.canvasMax,
+    presetId: resState.presetId,
     presets: Array.isArray(slot.presets) ? slot.presets : [],
     alignments: Array.isArray(slot.alignments) ? slot.alignments : RESOLUTION_ALIGNMENTS,
     canvas_limits: Array.isArray(slot.canvas_limits) ? slot.canvas_limits : RESOLUTION_CANVAS_LIMITS,
@@ -256,9 +284,6 @@ function normalizeResolutionPresets(value, defaultGroup) {
   return presets;
 }
 
-// 预设列表是 Aaalice 前端常量 + 个人预设接口，正常情况下由 PC 随模板下发。
-// 旧后端会丢掉这些附加字段，这里直接在同源下读取 Aaalice 的模型模块与接口，
-// 让手机端无需等 PC 再同步一次也能拿到完整预设。
 async function loadBuiltinResolutionPresets() {
   try {
     const response = await fetch("/extensions", { cache: "no-store" });
@@ -319,9 +344,6 @@ async function hydrateResolutionPresets(key) {
   current.presets = presets;
 }
 
-
-// 与 PC 端 Aaalice 的 normalizeResolutionState 保持同一套收敛规则：
-// 宽高按对齐值取整、画布上限自动容纳最大边、能匹配预设时自动回填 presetId。
 function normalizeResolution(slot, value) {
   if (typeof value === "string") {
     try {
@@ -436,7 +458,6 @@ function mergeListValue(slot, incoming, previousRaw) {
   const previousIds = new Set(previous.map((entry) => listIdentity(type, entry)).filter(Boolean));
   const incomingIds = new Set(incoming.map((entry) => listIdentity(type, entry)).filter(Boolean));
   for (const id of [...removed]) {
-    // PC 已经删掉，或者是在删除后重新加回来的，都解除挂起。
     if (!incomingIds.has(id) || !previousIds.has(id)) removed.delete(id);
   }
   if (removed.size) listRemovals.set(key, removed);
@@ -455,8 +476,6 @@ function mergeListValue(slot, incoming, previousRaw) {
 }
 
 function applyConfig(config, { reset = false } = {}) {
-  // 结构变化只重置新增、改类型或消失的槽位；正在编辑的值不会被模板同步打断。
-  // 切换工作流时 reset=true：即便节点 id 与槽位名完全相同，也强制回到新模板的默认值。
   const previousTypes = new Map((state.config?.slots || []).map((slot) => [slotKey(slot), slot.type]));
   const previousDefaults = new Map(
     (state.config?.slots || []).map((slot) => [slotKey(slot), JSON.stringify(slot.default_val ?? null)]),
@@ -687,19 +706,19 @@ function onResolutionPreset(slot, event) {
   if (presetId === "custom") return;
   const preset = (slot.presets || []).find((item) => item.id === presetId);
   if (!preset) return;
-  const state = resolutionValue(slot);
+  const resState = resolutionValue(slot);
   const presetAlignment = RESOLUTION_ALIGNMENTS.includes(Number(preset.alignment))
     ? Number(preset.alignment)
     : 8;
-  const currentFits = Number(preset.width) % state.alignment === 0
-    && Number(preset.height) % state.alignment === 0;
-  const alignment = preset.group === "personal" || !currentFits ? presetAlignment : state.alignment;
+  const currentFits = Number(preset.width) % resState.alignment === 0
+    && Number(preset.height) % resState.alignment === 0;
+  const alignment = preset.group === "personal" || !currentFits ? presetAlignment : resState.alignment;
   setResolutionValue(slot, {
     version: 1,
     width: alignResolution(preset.width, alignment),
     height: alignResolution(preset.height, alignment),
     alignment,
-    canvasMax: state.canvasMax,
+    canvasMax: resState.canvasMax,
     presetId: preset.id,
   });
 }
@@ -811,7 +830,6 @@ function collectSlots() {
   return data;
 }
 
-// 记录提交时的提示词，只用于本次会话图库的详情展示。
 function promptSnapshot() {
   const prompts = [];
   for (const slot of promptSlots.value) {
@@ -847,13 +865,10 @@ function formatError(error) {
 }
 
 async function loadConfig({ quiet = false, reset = false } = {}) {
-  // 切换工作流必须读到切换之后的状态：先等在途请求结束，再发一次新的读取。
   while (configInFlight && reset) {
     try {
       await configInFlight;
-    } catch {
-      // 在途请求的失败由它自己的 catch 处理。
-    }
+    } catch {}
   }
   if (configInFlight) return configInFlight;
   configInFlight = (async () => {
@@ -916,9 +931,7 @@ async function loadIntegrations() {
   try {
     const data = await getIntegrations();
     state.integrations = { prompt_vault: Boolean(data?.prompt_vault) };
-  } catch {
-    // 探测失败就当作插件不可用，原生槽位照常工作。
-  }
+  } catch {}
   if (state.integrations.prompt_vault) void loadVault();
 }
 
@@ -992,7 +1005,6 @@ function handleVaultInsert(entry) {
     if (addVaultTile(target.key, entry)) showToast("已加入磁贴", "success");
     return;
   }
-  // focus:false：抽屉还开着，不能让手机键盘从遮罩后面弹出来。
   insertSnippet(target.key, formatPromptWeight(text, entry.weight), { focus: false });
   showToast(`已插入${entry.title ? `「${entry.title}」` : "预设词条"}`, "success");
 }
@@ -1096,7 +1108,6 @@ function endTileDrag() {
   tileDrag = null;
 }
 
-// LoRA 托盘的选择器由托盘自己持有，这里只保留一个入口给字段头部的按钮。
 function setLoraTrayRef(key, instance) {
   if (instance) loraTrayRefs.set(key, instance);
   else loraTrayRefs.delete(key);
@@ -1131,7 +1142,6 @@ async function refreshWorkflows() {
 }
 
 async function openWorkflowDrawer() {
-  // 从侧边菜单进入时先收起菜单，避免两层抽屉叠在一起。
   state.drawer = false;
   state.workflowDrawer = true;
   await refreshWorkflows();
@@ -1146,7 +1156,6 @@ async function handleSwitchWorkflow(workflow) {
   if (!id || state.workflowBusyId) return;
   state.workflowBusyId = id;
   try {
-    // 先把上一次编辑的 debounce 写回落地，避免切换后这些请求落到新工作流的同 id 槽位上。
     await flushPendingWrites();
     const result = await switchWorkflow(id);
     await loadConfig({ quiet: false, reset: true });
@@ -1160,7 +1169,24 @@ async function handleSwitchWorkflow(workflow) {
   }
 }
 
-// LoRA 触发词一键插入正面提示词：优先落在光标处，没有光标时按逗号分隔追加。
+async function handleDeleteWorkflow(item) {
+  if (!item?.id || state.workflowBusyId) return;
+  state.workflowBusyId = item.id;
+  try {
+    const result = await deleteWorkflow(item.id);
+    showToast(`已删除工作流「${item.title}」`, "success");
+    await refreshWorkflows();
+    if (result?.active_changed) {
+      await loadConfig({ quiet: false, reset: true });
+      state.workflowActiveId = String(result.active_id || "");
+    }
+  } catch (error) {
+    showToast(`删除失败：${formatError(error)}`, "error");
+  } finally {
+    state.workflowBusyId = "";
+  }
+}
+
 function handleInsertWord(word) {
   const snippet = String(word || "").trim();
   if (!snippet) return;
@@ -1192,10 +1218,52 @@ function clearPrompt(slot) {
   showToast("提示词已清空");
 }
 
+async function deliverDualChannelImage(rawImage, meta = null) {
+  if (state.samplerPreview && state.samplerPreview.startsWith("blob:")) {
+    URL.revokeObjectURL(state.samplerPreview);
+    state.samplerPreview = null;
+  }
+  state.activeSamplerNode = null;
+
+  const at = Date.now();
+  const fastUrl = buildFastPreviewUrl({ ...rawImage, at });
+  const streamUrl = buildStreamImageUrl({ ...rawImage, at });
+
+  state.fastPreview = fastUrl;
+  state.fullLoaded = false;
+  state.streamLoading = true;
+
+  try {
+    const { blobUrl, bytes } = await fetchImageBlobUrl(streamUrl);
+    const completeImage = {
+      filename: rawImage.filename,
+      subfolder: rawImage.subfolder || "",
+      type: rawImage.type || "output",
+      at,
+      url: blobUrl,
+      bytes,
+      fastUrl,
+      streamUrl,
+    };
+    setImage(completeImage, meta);
+  } catch (err) {
+    setImage({
+      filename: rawImage.filename,
+      subfolder: rawImage.subfolder || "",
+      type: rawImage.type || "output",
+      at,
+      url: streamUrl,
+      fastUrl,
+      streamUrl,
+    }, meta);
+  } finally {
+    state.streamLoading = false;
+  }
+}
+
 function setImage(image, meta = null) {
   state.image = image;
   state.imageError = false;
-  // 结果会复制到页面内存的会话图库；成功后主预览也改用内存副本。
   void captureGeneratedImage(image, meta || promptSnapshot()).then((item) => {
     if (!item || !state.image) return;
     if (
@@ -1268,10 +1336,17 @@ function finishRun(target, errorMessage = "") {
   const meta = target.meta;
   run = null;
 
+  if (state.samplerPreview && state.samplerPreview.startsWith("blob:")) {
+    URL.revokeObjectURL(state.samplerPreview);
+    state.samplerPreview = null;
+  }
+  state.activeSamplerNode = null;
+
   state.generating = false;
   state.stopping = false;
   state.progress = null;
   state.currentNode = null;
+  state.queueNumber = null;
 
   if (errorMessage) {
     state.error = errorMessage;
@@ -1285,13 +1360,19 @@ function finishRun(target, errorMessage = "") {
   }
 }
 
-// 用户主动停止：不弹错误横幅，只收掉运行态并给一条轻提示。
 function stopRun(message = "已停止生成") {
+  if (state.samplerPreview && state.samplerPreview.startsWith("blob:")) {
+    URL.revokeObjectURL(state.samplerPreview);
+    state.samplerPreview = null;
+  }
+  state.activeSamplerNode = null;
+
   if (!run) {
     state.generating = false;
     state.stopping = false;
     state.progress = null;
     state.currentNode = null;
+    state.queueNumber = null;
     return;
   }
   run.finished = true;
@@ -1301,6 +1382,7 @@ function stopRun(message = "已停止生成") {
   state.stopping = false;
   state.progress = null;
   state.currentNode = null;
+  state.queueNumber = null;
   showToast(message);
 }
 
@@ -1308,14 +1390,12 @@ async function stopGeneration() {
   if (!state.generating || state.stopping) return;
   const promptId = run?.promptId;
   if (!promptId) {
-    // 运行态异常（例如页面在任务中途恢复）时至少把本地状态收干净。
     stopRun("已停止生成");
     return;
   }
   state.stopping = true;
   try {
     const result = await cancelPrompt(promptId);
-    // 后端同时尝试中断正在执行的任务并清理队列；两者都为 false 说明任务已经结束。
     stopRun(result?.stopped ? "已停止生成" : "任务已经结束");
   } catch (error) {
     state.stopping = false;
@@ -1340,11 +1420,11 @@ function imageFromHistory(entry) {
   if (!entry?.outputs) return null;
   const preferred = outputNodeId.value ? entry.outputs[String(outputNodeId.value)] : null;
   if (preferred) {
-    const image = imageFromOutput(preferred);
+    const image = extractImage(preferred);
     if (image) return image;
   }
   for (const output of Object.values(entry.outputs)) {
-    const image = imageFromOutput(output);
+    const image = extractImage(output);
     if (image) return image;
   }
   return null;
@@ -1354,9 +1434,9 @@ async function hydrateFromHistory(promptId, meta = null) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
       const entry = await fetchHistory(promptId);
-      const image = imageFromHistory(entry);
-      if (image) {
-        setImage(image, meta);
+      const rawImage = imageFromHistory(entry);
+      if (rawImage) {
+        await deliverDualChannelImage(rawImage, meta);
         showToast("生成完成", "success");
         return;
       }
@@ -1364,9 +1444,7 @@ async function hydrateFromHistory(promptId, meta = null) {
         state.error = "执行失败，请查看 ComfyUI 控制台";
         return;
       }
-    } catch {
-      // ComfyUI can briefly refuse history reads while the queue finalizes.
-    }
+    } catch {}
     await new Promise((resolve) => setTimeout(resolve, 600));
   }
   state.error = "执行已经结束，但没有找到输出图片。请确认主输出节点设置正确。";
@@ -1386,26 +1464,38 @@ function startRunPolling(target) {
       const entry = await fetchHistory(target.promptId);
       if (!target || target !== run || target.finished) return;
       if (!entry) return;
-      const image = imageFromHistory(entry);
-      if (image) {
-        setImage(image, target.meta);
+      const rawImage = imageFromHistory(entry);
+      if (rawImage) {
+        void deliverDualChannelImage(rawImage, target.meta);
         target.image = true;
       }
       if (entry.status?.status_str === "error") {
         finishRun(target, "执行失败，请查看 ComfyUI 控制台。");
         return;
       }
-      // 历史记录出现即代表任务已经结束，图片可以缺失（例如只有预览节点）。
       scheduleFinish(150);
-    } catch {
-      // Polling is only a WebSocket fallback; transient failures are ignored.
-    }
+    } catch {}
   }, 4000);
 }
 
 async function generate() {
   if (!state.hasTemplate || state.generating || state.stopping) return;
   state.error = "";
+  state.image = null;
+  state.fastPreview = null;
+  state.fullLoaded = false;
+  state.streamLoading = false;
+  if (state.samplerPreview && state.samplerPreview.startsWith("blob:")) {
+    URL.revokeObjectURL(state.samplerPreview);
+  }
+  state.samplerPreview = null;
+  state.activeSamplerNode = null;
+  state.generating = true;
+  state.stopping = false;
+  state.queueNumber = null;
+  state.progress = null;
+  state.currentNode = "等待执行";
+
   try {
     await flushPendingWrites();
     const meta = promptSnapshot();
@@ -1420,10 +1510,7 @@ async function generate() {
       pollAttempts: 0,
       meta,
     };
-    state.generating = true;
-    state.stopping = false;
-    state.progress = null;
-    state.currentNode = "等待执行";
+    state.queueNumber = result.number ?? null;
     showToast(
       result.skipped
         ? `已提交 #${result.number}，跳过 ${result.skipped} 项失效写入`
@@ -1432,6 +1519,7 @@ async function generate() {
     );
     if (state.connection !== "online") startRunPolling(run);
   } catch (error) {
+    state.generating = false;
     state.error = formatError(error);
     showToast("提交失败", "error");
   }
@@ -1453,19 +1541,23 @@ function handleSocketMessage(message) {
   if (data.prompt_id && data.prompt_id !== run.promptId) return;
 
   if (message.type === "status") {
-    // ComfyUI 只向提交任务的 client 广播 execution_success，本页没有自己的
-    // client_id，所以以队列清空作为任务结束的可靠信号。
     if (data.status?.exec_info?.queue_remaining === 0) scheduleFinish(400);
     return;
   }
   if (message.type === "execution_start") {
     state.generating = true;
+    state.queueNumber = null;
+    state.activeSamplerNode = null;
     state.currentNode = "准备执行";
     return;
   }
   if (message.type === "progress") {
     state.progress = { value: Number(data.value) || 0, max: Number(data.max) || 0 };
-    state.currentNode = nodeName(data.node);
+    const targetNodeId = data.node ? String(data.node) : null;
+    if (targetNodeId) {
+      state.activeSamplerNode = { id: targetNodeId, name: nodeName(targetNodeId) };
+      state.currentNode = state.activeSamplerNode.name;
+    }
     return;
   }
   if (message.type === "executing") {
@@ -1479,9 +1571,9 @@ function handleSocketMessage(message) {
   }
   if (message.type === "executed") {
     if (outputNodeId.value && String(data.node) !== String(outputNodeId.value)) return;
-    const image = imageFromOutput(data.output);
-    if (image) {
-      setImage(image, run?.meta);
+    const rawImage = extractImage(data.output);
+    if (rawImage) {
+      void deliverDualChannelImage(rawImage, run?.meta);
       run.image = true;
     }
     return;
@@ -1525,6 +1617,7 @@ function connectSocket() {
     return;
   }
   socket = nextSocket;
+  nextSocket.binaryType = "arraybuffer";
 
   nextSocket.onopen = () => {
     reconnectAttempt = 0;
@@ -1535,6 +1628,10 @@ function connectSocket() {
   };
 
   nextSocket.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) {
+      handleBinaryPreview(event.data);
+      return;
+    }
     if (typeof event.data !== "string") return;
     let message;
     try {
@@ -1548,9 +1645,7 @@ function connectSocket() {
   nextSocket.onerror = () => {
     try {
       nextSocket.close();
-    } catch {
-      // The close handler owns reconnection.
-    }
+    } catch {}
   };
 
   nextSocket.onclose = () => {
@@ -1569,9 +1664,7 @@ function reconnect() {
   if (socket) {
     try {
       socket.close();
-    } catch {
-      // Reconnect regardless of the old socket state.
-    }
+    } catch {}
     socket = null;
   }
   reconnectAttempt = 0;
@@ -1593,9 +1686,7 @@ async function copyPageLink() {
     try {
       await navigator.share({ title: "PocketNAI", url });
       return;
-    } catch {
-      // Fall back to clipboard when the share sheet is cancelled or blocked.
-    }
+    } catch {}
   }
   try {
     await navigator.clipboard.writeText(url);
@@ -1603,6 +1694,24 @@ async function copyPageLink() {
   } catch {
     showToast(url, "info");
   }
+}
+
+function handleBinaryPreview(buffer) {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength <= 8) return;
+  const view = new DataView(buffer, 0, 8);
+  const eventType = view.getUint32(0);
+  const imageType = view.getUint32(4);
+  if (eventType !== 1) return;
+
+  const mime = imageType === 2 ? "image/png" : "image/jpeg";
+  const imageBytes = new Uint8Array(buffer, 8);
+  const blob = new Blob([imageBytes], { type: mime });
+  const newUrl = URL.createObjectURL(blob);
+
+  if (state.samplerPreview && state.samplerPreview.startsWith("blob:")) {
+    URL.revokeObjectURL(state.samplerPreview);
+  }
+  state.samplerPreview = newUrl;
 }
 
 function onInstallPrompt(event) {
@@ -1626,9 +1735,7 @@ function applyTheme(themeId, { persist = true } = {}) {
   if (persist) {
     try {
       localStorage.setItem(THEME_KEY, theme);
-    } catch {
-      // 隐私模式下忽略持久化失败。
-    }
+    } catch {}
   }
 }
 
@@ -1640,9 +1747,7 @@ function applyAppearance(appearance, { persist = true } = {}) {
   if (persist) {
     try {
       localStorage.setItem(APPEARANCE_KEY, state.appearance);
-    } catch {
-      // 隐私模式下忽略持久化失败。
-    }
+    } catch {}
   }
 }
 
@@ -1705,9 +1810,7 @@ async function installApp() {
   await prompt.prompt();
   try {
     await prompt.userChoice;
-  } catch {
-    // The browser owns the install result.
-  }
+  } catch {}
 }
 
 function onVisibilityChange() {
@@ -1865,12 +1968,12 @@ onBeforeUnmount(() => {
           </svg>
         </div>
         <span class="eyebrow">WAITING FOR A WORKFLOW</span>
-        <h2>先给工作流放几个槽位</h2>
-        <p class="empty-copy">在 PC 端画布上右键任意节点，把想交给手机的输入绑定成槽位。保存或排队后，模板会自动推送过来。</p>
+        <h2>先推送一个工作流副本</h2>
+        <p class="empty-copy">在 PC 端左侧边栏找到 PocketNAI 标签页，点击「📱 推送当前工作流至手机」。模板将以独立快照形式存入手机。</p>
         <ol class="empty-steps">
-          <li><span>01</span>在 ComfyUI 打开工作流</li>
-          <li><span>02</span>节点右键 → 手机 移动端槽位</li>
-          <li><span>03</span>为 SaveImage 设置主输出</li>
+          <li><span>01</span>在 PC 端 ComfyUI 绑定槽位</li>
+          <li><span>02</span>左侧边栏点击 PocketNAI 手机图标</li>
+          <li><span>03</span>点击「推送当前工作流至手机」</li>
         </ol>
         <div class="empty-actions">
           <button class="primary-button" type="button" @click="refreshTemplate(true)">重新读取模板</button>
@@ -2257,14 +2360,45 @@ onBeforeUnmount(() => {
         </section>
 
         <section class="image-card panel">
-          <div class="image-viewport" :class="{ empty: !state.image || state.imageError }">
-            <img
-              v-if="state.image && !state.imageError"
-              :src="state.image.url"
-              :alt="state.image.filename || '生成结果'"
-              draggable="false"
-              @error="imageFailed"
-            />
+          <div class="image-viewport" :class="{ empty: (!state.image && !state.fastPreview && !state.samplerPreview && !state.generating) || state.imageError }">
+            <div v-if="state.generating && state.samplerPreview && !state.fastPreview" class="sampler-preview-container">
+              <div class="sampler-live-badge">
+                <span class="fluid-pulse-dot"></span>
+                <strong>{{ activeSamplerLabel }}</strong>
+                <span v-if="state.progress?.max">Step {{ state.progress.value }}/{{ state.progress.max }} ({{ progressPercent }}%)</span>
+              </div>
+              <img class="sampler-live-img" :src="state.samplerPreview" alt="实时采样预览" />
+            </div>
+
+            <div v-else-if="state.generating && !state.fastPreview" class="cyber-fluid-wave">
+              <div class="fluid-status-badge">
+                <span class="fluid-pulse-dot"></span>
+                <span class="fluid-status-title">{{ fluidStatusText }}</span>
+              </div>
+              <span v-if="fluidStatusSub" class="fluid-status-sub">{{ fluidStatusSub }}</span>
+            </div>
+
+            <div v-else-if="(state.fastPreview || state.image) && !state.imageError" class="image-preview-progressive">
+              <img
+                v-if="state.fastPreview"
+                class="fast-blur-img"
+                :class="{ 'is-hidden': state.fullLoaded }"
+                :src="state.fastPreview"
+                alt=""
+                aria-hidden="true"
+              />
+              <img
+                v-if="state.image"
+                class="full-stream-img"
+                :class="{ 'is-loaded': state.fullLoaded }"
+                :src="state.image.url"
+                :alt="state.image.filename || '生成结果'"
+                draggable="false"
+                @load="state.fullLoaded = true"
+                @error="imageFailed"
+              />
+            </div>
+
             <div v-else class="image-placeholder">
               <svg viewBox="0 0 64 64" aria-hidden="true">
                 <rect x="9" y="11" width="46" height="42" rx="7" />
@@ -2275,9 +2409,9 @@ onBeforeUnmount(() => {
               <small>{{ state.imageError ? "可点右上角在新窗口打开" : "生成后的作品会在这里出现" }}</small>
             </div>
 
-            <div v-if="state.image" class="image-toolbar">
-              <span class="output-tag">OUTPUT</span>
-              <div class="image-actions">
+            <div v-if="state.image || state.fastPreview" class="image-toolbar">
+              <span class="output-tag">{{ state.streamLoading ? 'STREAMING...' : 'OUTPUT' }}</span>
+              <div v-if="state.image" class="image-actions">
                 <button type="button" title="打开本次生成图库" aria-label="打开本次生成图库" @click="openGallery">
                   <AppIcon name="image" :size="16" />
                 </button>
@@ -2302,7 +2436,7 @@ onBeforeUnmount(() => {
         </section>
 
         <footer class="app-footer">
-          <span>PocketNAI v2.0</span>
+          <span>PocketNAI v2.1</span>
           <span class="footer-sep">/</span>
           <span>{{ tagStatusLabel }}</span>
           <a href="/" target="_blank" rel="noopener">ComfyUI</a>
@@ -2346,6 +2480,7 @@ onBeforeUnmount(() => {
       :error="state.workflowError"
       @close="closeWorkflowDrawer"
       @switch="handleSwitchWorkflow"
+      @delete="handleDeleteWorkflow"
       @refresh="refreshWorkflows"
     />
 
@@ -2409,7 +2544,7 @@ onBeforeUnmount(() => {
             <div class="drawer-actions">
               <button type="button" @click="openWorkflowDrawer">
                 <AppIcon name="folder" :size="16" />
-                切换工作流
+                工作流管理
               </button>
               <button type="button" @click="openGallery">
                 <AppIcon name="image" :size="16" />

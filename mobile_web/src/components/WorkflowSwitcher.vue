@@ -12,7 +12,7 @@ const props = defineProps({
   error: { type: String, default: "" },
 });
 
-const emit = defineEmits(["close", "switch", "refresh"]);
+const emit = defineEmits(["close", "switch", "delete", "refresh"]);
 
 const items = computed(() => (Array.isArray(props.workflows) ? props.workflows : []));
 const hasItems = computed(() => items.value.length > 0);
@@ -42,16 +42,23 @@ function pick(item) {
   }
   emit("switch", item);
 }
+
+function handleDelete(item) {
+  if (!item?.id || props.busyId) return;
+  if (window.confirm(`确定要删除工作流「${item.title}」吗？`)) {
+    emit("delete", item);
+  }
+}
 </script>
 
 <template>
   <transition name="sheet">
     <div v-if="open" class="sheet-backdrop" @click.self="emit('close')">
-      <section class="vault-sheet workflow-sheet" role="dialog" aria-modal="true" aria-label="切换工作流">
+      <section class="vault-sheet workflow-sheet" role="dialog" aria-modal="true" aria-label="工作流管理">
         <header class="sheet-head">
           <div class="sheet-title">
             <span class="eyebrow">WORKFLOWS</span>
-            <strong>切换工作流</strong>
+            <strong>工作流管理</strong>
           </div>
           <button class="sheet-close" type="button" aria-label="关闭工作流列表" @click="emit('close')">
             <AppIcon name="close" :size="14" />
@@ -72,18 +79,20 @@ function pick(item) {
           </p>
 
           <p v-else-if="!hasItems" class="sheet-hint">
-            还没有已保存的工作流。在 PC 端保存一次工作流或直接点一次队列，模板会自动落盘到这里。
+            还没有已推送的工作流。在 PC 端左侧边栏点击「推送当前工作流至手机」即可同步。
           </p>
 
           <div v-else class="workflow-list">
-            <button
+            <div
               v-for="item in items"
               :key="item.id"
               class="workflow-row"
               :class="{ active: isActive(item), busy: busyId === item.id }"
-              type="button"
-              :disabled="Boolean(busyId)"
+              role="button"
+              tabindex="0"
               @click="pick(item)"
+              @keydown.enter="pick(item)"
+              @keydown.space.prevent="pick(item)"
             >
               <span class="workflow-copy">
                 <strong>{{ item.title }}</strong>
@@ -92,17 +101,28 @@ function pick(item) {
                   <template v-if="formatTime(item.updated_at)"> · {{ formatTime(item.updated_at) }}</template>
                 </span>
               </span>
-              <span class="workflow-state">
-                <template v-if="busyId === item.id">切换中…</template>
-                <template v-else-if="isActive(item)">使用中</template>
-                <template v-else>切换</template>
-              </span>
-            </button>
+              <div class="workflow-actions-wrap" @click.stop>
+                <span class="workflow-state">
+                  <template v-if="busyId === item.id">处理中…</template>
+                  <template v-else-if="isActive(item)">活动中</template>
+                  <template v-else>切换</template>
+                </span>
+                <button
+                  class="workflow-delete-btn"
+                  type="button"
+                  title="删除工作流"
+                  :disabled="Boolean(busyId)"
+                  @click.stop="handleDelete(item)"
+                >
+                  <AppIcon name="trash" :size="13" />
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 
         <footer class="sheet-foot">
-          <span>切换后手机端立即生效，PC 画布不受影响</span>
+          <span>支持独立切换与删除，PC 端自由解绑</span>
           <button v-if="hasItems" type="button" class="sheet-refresh" @click="emit('refresh')">刷新</button>
         </footer>
       </section>

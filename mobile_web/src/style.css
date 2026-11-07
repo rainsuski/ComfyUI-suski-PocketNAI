@@ -195,7 +195,6 @@
   --header-bg-soft: rgba(0, 0, 0, 0.78);
 }
 
-/* ---------- 明暗外观（主题色 × 明暗模式） ---------- */
 :root {
   color-scheme: dark;
   --surface-rgb: 255, 255, 255;
@@ -271,7 +270,6 @@ html[data-appearance="light"] {
   --lightbox-media-bg: #0b0d12;
 }
 
-/* 樱夜微光 · 浅色 */
 html[data-appearance="light"][data-theme="sakura"] {
   --bg-base: #fcf7fa;
   --bg: #fffafc;
@@ -307,7 +305,6 @@ html[data-appearance="light"][data-theme="sakura"] {
   --header-bg-soft: rgba(252, 247, 250, 0.7);
 }
 
-/* 极夜冰蓝 · 浅色 */
 html[data-appearance="light"][data-theme="nordic"] {
   --bg-base: #f6f9fd;
   --bg: #fbfdff;
@@ -343,7 +340,6 @@ html[data-appearance="light"][data-theme="nordic"] {
   --header-bg-soft: rgba(246, 249, 253, 0.7);
 }
 
-/* 赛博霓虹 · 浅色 */
 html[data-appearance="light"][data-theme="cyberpunk"] {
   --bg-base: #f8f5ff;
   --bg: #fdfaff;
@@ -379,7 +375,6 @@ html[data-appearance="light"][data-theme="cyberpunk"] {
   --header-bg-soft: rgba(248, 245, 255, 0.7);
 }
 
-/* 翡翠极光 · 浅色 */
 html[data-appearance="light"][data-theme="emerald"] {
   --bg-base: #f5fbf8;
   --bg: #fafffc;
@@ -415,7 +410,6 @@ html[data-appearance="light"][data-theme="emerald"] {
   --header-bg-soft: rgba(245, 251, 248, 0.7);
 }
 
-/* 落日琥珀 · 浅色 */
 html[data-appearance="light"][data-theme="amber"] {
   --bg-base: #fdf9f2;
   --bg: #fffdf9;
@@ -451,7 +445,6 @@ html[data-appearance="light"][data-theme="amber"] {
   --header-bg-soft: rgba(253, 249, 242, 0.7);
 }
 
-/* 纯粹玄黑 · 浅色 */
 html[data-appearance="light"][data-theme="monochrome"] {
   --bg-base: #f7f7f7;
   --bg: #fbfbfb;
@@ -830,7 +823,7 @@ a {
   word-break: break-word;
 }
 
-.error-banner > button {
+.error-banner>button {
   display: grid;
   flex: 0 0 auto;
   width: 26px;
@@ -1374,7 +1367,7 @@ a {
   display: block;
 }
 
-.resolution-size-field > span {
+.resolution-size-field>span {
   position: absolute;
   top: 50%;
   left: 12px;
@@ -1505,12 +1498,12 @@ a {
     background 180ms ease;
 }
 
-.switch input:checked + .switch-track {
+.switch input:checked+.switch-track {
   border-color: rgba(var(--accent-rgb), 0.35);
   background: rgba(var(--accent-rgb), 0.2);
 }
 
-.switch input:checked + .switch-track::after {
+.switch input:checked+.switch-track::after {
   background: var(--accent);
   transform: translateX(20px);
 }
@@ -1678,6 +1671,141 @@ a {
   user-select: auto;
 }
 
+.image-preview-progressive {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.fast-blur-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: blur(14px);
+  transform: scale(1.05);
+  transition: opacity 250ms ease;
+  pointer-events: none;
+}
+
+.fast-blur-img.is-hidden {
+  opacity: 0;
+}
+
+.full-stream-img {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  max-height: 65vh;
+  object-fit: contain;
+  opacity: 0;
+  transition: opacity 200ms ease;
+  -webkit-touch-callout: default;
+  user-select: auto;
+}
+
+.full-stream-img.is-loaded {
+  opacity: 1;
+}
+
+.cyber-fluid-wave {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(var(--accent-rgb), 0.16), rgba(var(--violet-rgb), 0.09) 55%, transparent 75%),
+    var(--media-bg);
+  z-index: 2;
+}
+
+.cyber-fluid-wave::before,
+.cyber-fluid-wave::after {
+  content: "";
+  position: absolute;
+  border-radius: 42%;
+  pointer-events: none;
+}
+
+.cyber-fluid-wave::before {
+  width: 140%;
+  height: 140%;
+  background: radial-gradient(circle, rgba(var(--accent-rgb), 0.22) 0%, transparent 65%);
+  filter: blur(28px);
+  animation: fluid-wave-spin 9s linear infinite;
+}
+
+.cyber-fluid-wave::after {
+  width: 160%;
+  height: 160%;
+  background: radial-gradient(circle, rgba(var(--violet-rgb), 0.18) 0%, transparent 68%);
+  filter: blur(36px);
+  animation: fluid-wave-spin 13s linear infinite reverse;
+}
+
+.fluid-status-badge {
+  position: relative;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border: 1px solid rgba(var(--accent-rgb), 0.32);
+  border-radius: 999px;
+  background: rgba(var(--surface-rgb), 0.08);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.fluid-pulse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.85);
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+.fluid-status-title {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.fluid-status-sub {
+  position: relative;
+  z-index: 3;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
+@keyframes fluid-wave-spin {
+  0% {
+    transform: rotate(0deg) scale(1);
+  }
+
+  50% {
+    transform: rotate(180deg) scale(1.06);
+  }
+
+  100% {
+    transform: rotate(360deg) scale(1);
+  }
+}
+
 .image-placeholder {
   display: grid;
   justify-items: center;
@@ -1713,6 +1841,7 @@ a {
   top: 9px;
   right: 9px;
   left: 9px;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1855,7 +1984,6 @@ a {
   flex: 0 0 auto;
 }
 
-/* 抽屉打开时把轻提示移到顶部，避免盖住抽屉底部的操作区。 */
 .toast.toast-top {
   top: calc(70px + env(safe-area-inset-top));
   bottom: auto;
@@ -2739,7 +2867,7 @@ a {
   -webkit-overflow-scrolling: touch;
 }
 
-.sheet-section + .sheet-section {
+.sheet-section+.sheet-section {
   margin-top: 16px;
 }
 
@@ -2993,8 +3121,6 @@ a {
   opacity: 0;
 }
 
-/* ---------- 原生 LoRA 选择抽屉 ---------- */
-
 .lora-picker {
   max-height: 84dvh;
 }
@@ -3162,8 +3288,6 @@ a {
   font-weight: 650;
 }
 
-/* ---------- 工作流切换抽屉 ---------- */
-
 .workflow-sheet {
   max-height: 70dvh;
 }
@@ -3214,6 +3338,7 @@ a {
   background: rgba(var(--surface-rgb), 0.025);
   color: inherit;
   text-align: left;
+  cursor: pointer;
   transition:
     background 150ms ease,
     border-color 150ms ease;
@@ -3228,8 +3353,9 @@ a {
   background: rgba(var(--ok-rgb), 0.08);
 }
 
-.workflow-row:disabled {
+.workflow-row.busy {
   opacity: 0.6;
+  pointer-events: none;
 }
 
 .workflow-copy {
@@ -3253,8 +3379,14 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
-.workflow-state {
+.workflow-actions-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex: 0 0 auto;
+}
+
+.workflow-state {
   padding: 4px 9px;
   border-radius: 999px;
   background: rgba(var(--surface-rgb), 0.05);
@@ -3270,6 +3402,26 @@ a {
 
 .workflow-row.busy .workflow-state {
   color: var(--warn);
+}
+
+.workflow-delete-btn {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(var(--danger-rgb), 0.22);
+  border-radius: 8px;
+  background: rgba(var(--danger-rgb), 0.08);
+  color: var(--danger);
+  transition:
+    background 150ms ease,
+    transform 150ms ease;
+}
+
+.workflow-delete-btn:active {
+  background: rgba(var(--danger-rgb), 0.2);
+  transform: scale(0.92);
 }
 
 .sheet-refresh {
@@ -3355,6 +3507,7 @@ a {
 }
 
 @media (prefers-reduced-motion: reduce) {
+
   *,
   *::before,
   *::after {
@@ -3369,6 +3522,7 @@ a {
   from {
     background-position: 200% 0;
   }
+
   to {
     background-position: -200% 0;
   }
@@ -3381,10 +3535,12 @@ a {
 }
 
 @keyframes pulse-dot {
+
   0%,
   100% {
     opacity: 0.45;
   }
+
   50% {
     opacity: 1;
   }
@@ -3394,13 +3550,13 @@ a {
   0% {
     transform: translateX(-120%);
   }
+
   60%,
   100% {
     transform: translateX(330%);
   }
 }
 
-/* 明暗外观切换 */
 .appearance-toggle {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3446,7 +3602,6 @@ a {
   color: var(--accent);
 }
 
-/* 主题选择卡片 */
 .theme-selector-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3505,4 +3660,60 @@ a {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 新增: 采样器实时预览与多采样器运行态指示 */
+.sampler-preview-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--media-bg);
+}
+
+.sampler-live-img {
+  display: block;
+  width: 100%;
+  max-height: 65vh;
+  object-fit: contain;
+  transition: opacity 120ms ease;
+  user-select: none;
+}
+
+.sampler-live-badge {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 14px;
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: 999px;
+  background: rgba(16, 18, 24, 0.78);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  color: var(--text-strong);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.sampler-live-badge strong {
+  color: var(--accent);
+  font-weight: 650;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sampler-live-badge span {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
 }

@@ -1,9 +1,12 @@
 import { api } from "/scripts/api.js";
 import { app } from "/scripts/app.js";
 
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
 const CONFIG_KEY = "pocket_config";
 const SYNC_URL = "/pocket/api/sync_template";
+const WORKFLOWS_URL = "/pocket/api/workflows";
+const DELETE_WORKFLOW_URL = "/pocket/api/workflows/delete";
+const CONFIG_URL = "/pocket/api/config";
 const DEFAULT_TITLE = "ComfyUI 工作流";
 const OUTPUT_TYPES = new Set(["SaveImage", "PreviewImage"]);
 const INTERNAL_WIDGETS = new Set(["control_after_generate", "control_before_generate"]);
@@ -11,9 +14,6 @@ const LORA_NODE_CLASS = "Lora Loader (LoraManager)";
 const LORA_FIELD = "loras";
 const VAULT_NODE_CLASS = "PromptVaultSelector";
 const VAULT_FIELD = "selected_tiles_data";
-// Aaalice-Nodes 的 ResolutionPreset 没有原生输入控件：预设、宽高与画布上限
-// 都存在 node.properties 里，执行前由扩展把 {version,width,height} 写成
-// API Prompt 的 resolution_json。槽位因此也以该输入名为落点。
 const RESOLUTION_NODE_CLASS = "ResolutionPreset";
 const RESOLUTION_FIELD = "resolution_json";
 const RESOLUTION_PROPERTY = "resolutionPresetState";
@@ -23,13 +23,11 @@ const RESOLUTION_MIN = 16;
 const RESOLUTION_MAX = 16384;
 
 let nativeGraphToPrompt = null;
-let nativeQueuePrompt = null;
-let syncTimer = null;
 let syncInFlight = null;
-let syncDirty = false;
 let collectingPrompt = false;
 let domBadgeObserver = null;
 let domBadgeFrame = 0;
+let sidebarRefreshHandler = null;
 
 function cloneJson(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -172,8 +170,6 @@ function resolutionCanvasLimits(node) {
   return values.length ? values : [...RESOLUTION_CANVAS_LIMITS];
 }
 
-// 与 Aaalice 的 normalizeResolutionState 保持同样的收敛规则；不依赖扩展内部
-// 模块，Aaalice 尚未加载时也能从 properties 里读到上次保存的状态。
 function normalizeResolutionState(raw, presets, alignments, limits) {
   if (!raw || typeof raw !== "object") return null;
   const allowedAlignments = alignments?.length ? alignments : RESOLUTION_ALIGNMENTS;
@@ -210,16 +206,12 @@ function resolutionPayload(state) {
   return { version: 1, width: state.width, height: state.height };
 }
 
-// 给没有 LiteGraph 控件的节点造一个只读视图，槽位选择、序列化与标签都能复用
-// 现有逻辑；真正写入时走 Aaalice 的 _aaaliceResolutionControl.setValue。
 function resolutionWidget(node) {
   const state = resolutionState(node);
   if (!state) return null;
   return { name: RESOLUTION_FIELD, type: "resolution", value: state, options: { serialize: false } };
 }
 
-// 老版本后端不认识 resolution 类型，会把槽位降级成 text 并丢掉附加字段。
-// 把预设元数据同时塞进 default_val，降级后手机仍能读到完整的预设列表。
 function resolutionSlotState(node) {
   const state = resolutionState(node);
   if (!state) return null;
@@ -247,9 +239,6 @@ function dedupeTargets(targets) {
   return result;
 }
 
-// 子图实例本身不会出现在 API Prompt 里，graphToPrompt 只会输出扁平化的
-// "实例ID:内部节点ID"。沿子图输入槽的 linkIds 找到真正的叶子控件，
-// 注入时才能写到内部节点，而不是 outer node id。
 function resolveSubgraphLeafTargets(node, inputName, nodePath = []) {
   if (!isSubgraphNode(node) || !node.subgraph?.inputNode?.slots) return [];
   const slot = node.subgraph.inputNode.slots.find((entry) => entry.name === inputName);
@@ -311,8 +300,6 @@ function isVaultWidget(node, widget) {
   return nodeClass(node) === VAULT_NODE_CLASS && widget?.name === VAULT_FIELD;
 }
 
-// LoraLoaderLM 的 loras 控件是对象数组。移动端只接管真正参与加载的字段，
-// 顺带丢掉 selected 这类纯画布选择态。
 function loraEntries(widget) {
   const value = widget?.value;
   if (!Array.isArray(value)) return [];
@@ -331,8 +318,6 @@ function loraEntries(widget) {
   return entries;
 }
 
-// PromptVaultSelector 的磁贴只写在 serializeValue 里，权重变化不会回写 widget.value，
-// 因此这里优先走 serializeValue 拿权威值。
 function vaultTiles(widget) {
   if (!widget) return [];
   let raw = widget.value;
@@ -340,9 +325,7 @@ function vaultTiles(widget) {
     try {
       const serialized = widget.serializeValue();
       if (typeof serialized === "string") raw = serialized;
-    } catch {
-      // 序列化失败时退回上一次写入的控件值。
-    }
+    } catch { }
   }
   if (typeof raw === "string") {
     try {
@@ -561,7 +544,6 @@ function setSlot(node, widget, enabled) {
   commitConfig(app.graph);
   app.graph.setDirtyCanvas?.(true, true);
   node.setDirtyCanvas?.(true, true);
-  scheduleSync();
 }
 
 function setOutputNode(node) {
@@ -570,7 +552,6 @@ function setOutputNode(node) {
   config.output_node_title = String(node.title || node.type || "输出节点");
   commitConfig(app.graph);
   app.graph.setDirtyCanvas?.(true, true);
-  scheduleSync();
 }
 
 function clearOutputNode() {
@@ -579,7 +560,6 @@ function clearOutputNode() {
   config.output_node_title = null;
   commitConfig(app.graph);
   app.graph.setDirtyCanvas?.(true, true);
-  scheduleSync();
 }
 
 function isOutputNode(node) {
@@ -590,8 +570,6 @@ function nodeMenuItems(node) {
   const config = peekConfig(app.graph);
   const slots = (config?.slots || []).filter((slot) => String(slot.node_id) === String(node.id));
   const submenu = [];
-  // ResolutionPreset 的界面全部由 DOM 绘制，没有可枚举的 LiteGraph 控件，
-  // 这里单独给它一个槽位入口；状态仍写进 Properties，与画布完全同源。
   if (isResolutionNode(node)) {
     const bound = slots.some((slot) => slot.field === RESOLUTION_FIELD);
     const state = resolutionState(node);
@@ -627,7 +605,6 @@ function nodeMenuItems(node) {
   return items;
 }
 
-// 画布角标用矢量路径绘制：手机=槽位节点，准星=主输出节点。
 function drawPhoneBadge(ctx, cx, cy, size) {
   const width = size * 0.64;
   const height = size;
@@ -769,23 +746,8 @@ function installDomBadgeObserver() {
   scheduleDomBadgeSync();
 }
 
-function hookSubgraphRemovals(root) {
-  if (!root?.subgraphs || typeof root.subgraphs.values !== "function") return;
-  for (const subgraph of root.subgraphs.values()) {
-    if (!subgraph || subgraph.__pocketRemovalHooked) continue;
-    subgraph.__pocketRemovalHooked = true;
-    const originalNodeRemoved = subgraph.onNodeRemoved;
-    subgraph.onNodeRemoved = function (node) {
-      const result = originalNodeRemoved?.apply(this, arguments);
-      scheduleSync(0);
-      return result;
-    };
-  }
-}
-
 function hookGraph(graph) {
   if (!graph) return;
-  hookSubgraphRemovals(graph);
   if (graph.__pocketHooked) return;
   graph.__pocketHooked = true;
 
@@ -794,7 +756,6 @@ function hookGraph(graph) {
     const result = originalNodeRemoved?.apply(this, arguments);
     if (this === app.graph) {
       commitConfig(this);
-      scheduleSync(0);
     }
     return result;
   };
@@ -808,7 +769,6 @@ function hookGraph(graph) {
         if (!data.extra || typeof data.extra !== "object") data.extra = {};
         data.extra[CONFIG_KEY] = cloneJson(configOf(this));
       }
-      if (!collectingPrompt) scheduleSync(600);
       return data;
     };
   }
@@ -824,9 +784,6 @@ function hookGraph(graph) {
   };
 }
 
-// ResolutionPreset 的 resolution_json 是 Aaalice 在 graphToPrompt 阶段注入的；
-// 某些加载顺序下 PocketNAI 捕获到的原生函数可能绕过这层钩子。这里在提交模板前
-// 按节点真实状态再写一次，既保证字段存在，也不受扩展加载顺序影响。
 function ensureResolutionPromptInputs(apiPrompt, config) {
   for (const slot of config.slots || []) {
     if (slot.type !== "resolution") continue;
@@ -840,28 +797,28 @@ function ensureResolutionPromptInputs(apiPrompt, config) {
   }
 }
 
-async function postTemplate() {
+async function postTemplate(customTitle = null) {
   const graph = app.graph;
-  if (!graph) return;
+  if (!graph) throw new Error("画布尚未就绪");
   hookGraph(graph);
-  commitConfig(graph);
+  const config = commitConfig(graph);
+  if (customTitle) {
+    config.display_title = customTitle;
+  }
 
   collectingPrompt = true;
   let result;
   try {
-    // 优先走公开的 app.graphToPrompt，让其他扩展的 Prompt 钩子（例如
-    // Aaalice 的 resolution_json、模型专用输入）也进入模板；失败时退回原生。
     const promptFn = app.graphToPrompt?.bind(app) ?? nativeGraphToPrompt;
-    if (!promptFn) throw new Error("ComfyUI 还没有准备好 graphToPrompt()");
+    if (!promptFn) throw new Error("ComfyUI 尚未准备好 graphToPrompt()");
     result = await promptFn(graph);
   } finally {
     collectingPrompt = false;
   }
   const apiPrompt = result?.output;
   if (!apiPrompt || typeof apiPrompt !== "object") {
-    throw new Error("graphToPrompt() 没有返回 API Prompt");
+    throw new Error("graphToPrompt() 未返回有效 API Prompt");
   }
-  const config = configOf(graph);
   ensureResolutionPromptInputs(apiPrompt, config);
 
   const response = await api.fetchApi(SYNC_URL, {
@@ -870,20 +827,15 @@ async function postTemplate() {
     body: JSON.stringify({ api_prompt: apiPrompt, pocket_config: config }),
   });
   if (!response.ok) {
-    throw new Error(`模板同步失败（HTTP ${response.status}）`);
+    throw new Error(`模板推送失败（HTTP ${response.status}）`);
   }
+  return await response.json();
 }
 
-async function syncNow() {
-  if (syncInFlight) {
-    syncDirty = true;
-    return syncInFlight;
-  }
+async function syncNow(customTitle = null) {
+  if (syncInFlight) return syncInFlight;
   syncInFlight = (async () => {
-    do {
-      syncDirty = false;
-      await postTemplate();
-    } while (syncDirty);
+    return await postTemplate(customTitle);
   })();
   try {
     return await syncInFlight;
@@ -892,18 +844,6 @@ async function syncNow() {
   }
 }
 
-function scheduleSync(delay = 400) {
-  if (collectingPrompt) return;
-  clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => {
-    syncTimer = null;
-    void syncNow().catch((error) => console.warn("[PocketNAI]", error));
-  }, delay);
-}
-
-// Lora-Manager 的 LoraLoaderLM 同时维护两份真值：`loras` 数组与 `text` 纯文本。
-// 文本里残留的 <lora:...> 标签会在下一次文本回调时被 mergeLoras 重新解析回数组，
-// 于是移动端删掉的 LoRA 会「复活」。这里按最终列表重建文本，直接从源头切断旧标签。
 function loraSyntaxOf(entry) {
   const strength = Number(entry?.strength);
   const clip = Number(entry?.clipStrength ?? entry?.strength);
@@ -915,10 +855,6 @@ function loraSyntaxOf(entry) {
     : `<lora:${entry.name}:${format(model)}:${format(clipValue)}>`;
 }
 
-// Lora-Manager 的 text 控件是「DOM 自动补全」控件：真正的值来自内部 textarea.value。
-// 这里刻意不写 `widget.value`：新前端的 value setter 会顺带触发 callback → mergeLoras，
-// 而 mergeLoras 会丢弃不在文本里的条目，把刚静音的 LoRA 从 loras 数组里整条删掉。
-// 只写 DOM 值并广播 UI 变更事件，既刷新界面又不触发合并。
 function syncLoraTextWidget(node, entries) {
   const text = (Array.isArray(entries) ? entries : [])
     .filter((entry) => entry && entry.name && entry.active !== false)
@@ -937,7 +873,6 @@ function syncLoraTextWidget(node, entries) {
         new CustomEvent("lora-manager:autocomplete-value-changed", { detail: { value: text } }),
       );
     }
-    // 老前端把文本存在普通属性上时同步兜底：临时摘掉 callback，避免赋值触发合并。
     if (textWidget.value !== text) {
       const callback = textWidget.callback;
       textWidget.callback = undefined;
@@ -950,7 +885,6 @@ function syncLoraTextWidget(node, entries) {
     return;
   }
 
-  // DOM 还没挂载：写到 LiteGraph 的待应用值，控件 onMounted 时会自行套用。
   textWidget._pendingValue = text;
   textWidget.onSetValue?.(text);
 }
@@ -975,11 +909,8 @@ function applyListValue(node, widget, type, value) {
         };
       });
 
-    // 1. 更新结构体数组控件（真正的执行数据源）。
     widget.value = merged;
     widget.callback?.(merged);
-
-    // 2. 同步清洗并重构节点的 inputWidget / text 纯文本控件。
     syncLoraTextWidget(node, merged);
     return merged;
   }
@@ -1070,8 +1001,6 @@ function applyRemoteValue(nodeId, field, value) {
   if (!slot) return false;
   const node = nodeById(nodeId);
   if (!node) return false;
-  // ResolutionPreset 没有真实控件，值必须回到 Aaalice 的属性状态机，
-  // 由它同步按钮文字、画布框选与宽高输入框。
   if (slot.type === "resolution" && field === RESOLUTION_FIELD && isResolutionNode(node)) {
     return applyResolutionValue(node, value);
   }
@@ -1105,61 +1034,233 @@ function applyRemoteValue(nodeId, field, value) {
   return changed;
 }
 
-function handleApplySlots(event) {
-  const slots = event?.detail?.slots_data;
-  if (!slots || typeof slots !== "object" || !app.graph) return;
+async function pullMobileSlotsToCanvas() {
+  const response = await api.fetchApi(CONFIG_URL);
+  if (!response.ok) throw new Error("无法读取服务端配置");
+  const data = await response.json();
+  const config = data?.config;
+  if (!config || !Array.isArray(config.slots)) {
+    throw new Error("服务端暂无有效槽位数据");
+  }
+
   const graph = app.graph;
+  if (!graph) return 0;
   graph.beforeChange?.();
-  let changed = false;
+  let appliedCount = 0;
   try {
-    for (const [nodeId, fields] of Object.entries(slots)) {
-      if (!fields || typeof fields !== "object") continue;
-      for (const [field, value] of Object.entries(fields)) {
-        if (applyRemoteValue(nodeId, field, value)) changed = true;
+    for (const slot of config.slots) {
+      if (["prompt", "negative", "pv_tiles"].includes(slot.type)) continue;
+      const targetVal = slot.default_val;
+      if (targetVal !== undefined && applyRemoteValue(slot.node_id, slot.field, targetVal)) {
+        appliedCount += 1;
       }
     }
   } finally {
     graph.afterChange?.();
   }
-  if (!changed) return;
   commitConfig(graph);
   graph.setDirtyCanvas?.(true, true);
-  scheduleSync(120);
+  return appliedCount;
+}
+
+function formatRelativeTime(dateString) {
+  if (!dateString) return "";
+  const date = new Date(dateString);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function registerSidebarTab() {
+  if (!app.extensionManager?.registerSidebarTab) return;
+
+  app.extensionManager.registerSidebarTab({
+    id: "pocketnai-sidebar",
+    icon: "pi pi-mobile",
+    title: "PocketNAI",
+    tooltip: "PocketNAI 移动端协同管理",
+    type: "custom",
+    render: (container) => {
+      container.innerHTML = `
+        <div class="pocket-sidebar-root" style="display:flex;flex-direction:column;gap:14px;padding:14px;color:var(--fg-color,#ddd);font-size:13px;height:100%;overflow-y:auto;box-sizing:border-box;">
+          <div style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:10px;">
+            <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:6px;">
+              <span>📱</span> PocketNAI
+            </div>
+            <span style="font-size:11px;opacity:0.6;">v${VERSION}</span>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            <button id="pocket-btn-push-main" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:10px 14px;border:none;border-radius:8px;background:linear-gradient(135deg,#ff8fbe,#b496ff);color:#101218;font-weight:700;font-size:13px;cursor:pointer;transition:opacity 0.2s;">
+              <span>📱</span> 推送当前工作流至手机
+            </button>
+            <button id="pocket-btn-pull-slots" style="display:flex;align-items:center;justify-content:center;gap:6px;padding:8px 12px;border:1px solid rgba(255,255,255,0.12);border-radius:8px;background:rgba(255,255,255,0.04);color:var(--fg-color,#ddd);font-size:12px;cursor:pointer;">
+              <span>📥</span> 拉取手机端副本参数至画布
+            </button>
+          </div>
+
+          <div id="pocket-msg-banner" style="display:none;padding:8px 10px;border-radius:6px;font-size:12px;word-break:break-word;"></div>
+
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px;">
+            <span style="font-weight:600;font-size:12px;opacity:0.8;">已推送模板副本</span>
+            <button id="pocket-btn-refresh-list" style="background:none;border:none;color:var(--fg-color,#aaa);cursor:pointer;font-size:13px;padding:2px 4px;" title="刷新列表">🔄</button>
+          </div>
+
+          <div id="pocket-workflows-container" style="display:flex;flex-direction:column;gap:8px;min-height:80px;">
+            <div style="opacity:0.5;text-align:center;padding:16px 0;font-size:12px;">加载模板列表中…</div>
+          </div>
+        </div>
+      `;
+
+      const pushMainBtn = container.querySelector("#pocket-btn-push-main");
+      const pullSlotsBtn = container.querySelector("#pocket-btn-pull-slots");
+      const refreshListBtn = container.querySelector("#pocket-btn-refresh-list");
+      const banner = container.querySelector("#pocket-msg-banner");
+      const workflowsList = container.querySelector("#pocket-workflows-container");
+
+      const showNotice = (msg, isError = false) => {
+        banner.style.display = "block";
+        banner.style.background = isError ? "rgba(255,80,80,0.15)" : "rgba(80,220,120,0.15)";
+        banner.style.border = isError ? "1px solid rgba(255,80,80,0.3)" : "1px solid rgba(80,220,120,0.3)";
+        banner.style.color = isError ? "#ff8080" : "#70e090";
+        banner.textContent = msg;
+        setTimeout(() => {
+          banner.style.display = "none";
+        }, 4000);
+      };
+
+      const loadWorkflowsList = async () => {
+        try {
+          const res = await api.fetchApi(WORKFLOWS_URL);
+          if (!res.ok) throw new Error("无法加载工作流");
+          const data = await res.json();
+          const items = Array.isArray(data.workflows) ? data.workflows : [];
+          const activeId = data.active_id;
+
+          if (!items.length) {
+            workflowsList.innerHTML = `
+              <div style="opacity:0.5;text-align:center;padding:20px 0;font-size:12px;line-height:1.5;">
+                尚未推送任何模板<br>点击上方按钮即可推送
+              </div>
+            `;
+            return;
+          }
+
+          workflowsList.innerHTML = items.map((item) => {
+            const isActive = item.id === activeId;
+            return `
+              <div class="pocket-wf-card" data-id="${item.id}" style="display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:8px;border:1px solid ${isActive ? "rgba(255,143,190,0.4)" : "rgba(255,255,255,0.08)"};background:${isActive ? "rgba(255,143,190,0.08)" : "rgba(255,255,255,0.03)"};">
+                <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
+                  <strong style="font-size:13px;word-break:break-all;color:${isActive ? "#ff9fc4" : "inherit"};">${item.title}</strong>
+                  ${isActive ? '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(255,143,190,0.2);color:#ff8fbe;white-space:nowrap;">活动中</span>' : ""}
+                </div>
+                <div style="font-size:11px;opacity:0.6;display:flex;align-items:center;justify-content:space-between;">
+                  <span>${item.slots_count} 个槽位</span>
+                  <span>${formatRelativeTime(item.updated_at)}</span>
+                </div>
+                <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05);">
+                  <button class="pocket-btn-repush" data-title="${item.title}" style="background:none;border:1px solid rgba(255,255,255,0.15);border-radius:4px;color:var(--fg-color,#ccc);font-size:11px;padding:3px 8px;cursor:pointer;">覆盖推送</button>
+                  <button class="pocket-btn-del" data-id="${item.id}" data-title="${item.title}" style="background:none;border:1px solid rgba(255,80,80,0.25);border-radius:4px;color:#ff8080;font-size:11px;padding:3px 8px;cursor:pointer;">删除</button>
+                </div>
+              </div>
+            `;
+          }).join("");
+
+          workflowsList.querySelectorAll(".pocket-btn-repush").forEach((btn) => {
+            btn.onclick = async () => {
+              const targetTitle = btn.getAttribute("data-title");
+              if (!confirm(`确定用当前画布覆盖推送至「${targetTitle}」？`)) return;
+              btn.disabled = true;
+              try {
+                await syncNow(targetTitle);
+                showNotice(`已成功覆盖推送至「${targetTitle}」`);
+                await loadWorkflowsList();
+              } catch (err) {
+                showNotice(`覆盖失败: ${err.message}`, true);
+              } finally {
+                btn.disabled = false;
+              }
+            };
+          });
+
+          workflowsList.querySelectorAll(".pocket-btn-del").forEach((btn) => {
+            btn.onclick = async () => {
+              const targetId = btn.getAttribute("data-id");
+              const targetTitle = btn.getAttribute("data-title");
+              if (!confirm(`确定在服务端删除工作流「${targetTitle}」吗？`)) return;
+              btn.disabled = true;
+              try {
+                const res = await api.fetchApi(DELETE_WORKFLOW_URL, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ id: targetId }),
+                });
+                if (!res.ok) throw new Error("删除请求失败");
+                showNotice(`已删除「${targetTitle}」`);
+                await loadWorkflowsList();
+              } catch (err) {
+                showNotice(`删除失败: ${err.message}`, true);
+              } finally {
+                btn.disabled = false;
+              }
+            };
+          });
+        } catch (err) {
+          workflowsList.innerHTML = `<div style="color:#ff8080;text-align:center;padding:10px 0;font-size:12px;">加载失败: ${err.message}</div>`;
+        }
+      };
+
+      sidebarRefreshHandler = loadWorkflowsList;
+
+      pushMainBtn.onclick = async () => {
+        pushMainBtn.disabled = true;
+        pushMainBtn.style.opacity = "0.6";
+        try {
+          const res = await syncNow();
+          showNotice(`已推送「${res.title}」（${res.slots} 个槽位）`);
+          await loadWorkflowsList();
+        } catch (err) {
+          showNotice(`推送失败: ${err.message}`, true);
+        } finally {
+          pushMainBtn.disabled = false;
+          pushMainBtn.style.opacity = "1";
+        }
+      };
+
+      pullSlotsBtn.onclick = async () => {
+        pullSlotsBtn.disabled = true;
+        try {
+          const count = await pullMobileSlotsToCanvas();
+          showNotice(`已将手机端 ${count} 个参数更新至画布`);
+        } catch (err) {
+          showNotice(`拉取参数失败: ${err.message}`, true);
+        } finally {
+          pullSlotsBtn.disabled = false;
+        }
+      };
+
+      refreshListBtn.onclick = () => {
+        void loadWorkflowsList();
+      };
+
+      void loadWorkflowsList();
+    },
+  });
 }
 
 function installAppHooks() {
   if (typeof app.graphToPrompt === "function" && !nativeGraphToPrompt) {
     nativeGraphToPrompt = app.graphToPrompt.bind(app);
-    // 原生默认参数是 this.rootGraph，老前端没有该属性时会把 undefined 传下去，
-    // 这里统一兜底到 app.graph。
     app.graphToPrompt = async function (graph, ...args) {
       const target = graph ?? app.graph;
       commitConfig(target);
-      const result = await nativeGraphToPrompt(target, ...args);
-      if (!collectingPrompt) scheduleSync();
-      return result;
+      return await nativeGraphToPrompt(target, ...args);
     };
   }
-
-  if (typeof app.queuePrompt === "function" && !nativeQueuePrompt) {
-    nativeQueuePrompt = app.queuePrompt.bind(app);
-    app.queuePrompt = async function (...args) {
-      try {
-        await syncNow();
-      } catch (error) {
-        console.warn("[PocketNAI] 队列前置同步失败", error);
-      }
-      return nativeQueuePrompt(...args);
-    };
-  }
-
-  api.addEventListener("promptQueueing", () => scheduleSync(0));
-  api.addEventListener("promptQueued", () => scheduleSync(800));
-  // Lora-Manager 的「发送到工作流」会广播该事件并改写节点的 loras 控件，
-  // 等它写完再同步模板，手机端就能拿到最新的挂载列表。
-  api.addEventListener("lora_code_update", () => scheduleSync(300));
-  // 手机端的编辑写回：直接改真实控件，再让正常同步把结果发回手机。
-  api.addEventListener("pocket:apply_slots", handleApplySlots);
 }
 
 app.registerExtension({
@@ -1169,17 +1270,20 @@ app.registerExtension({
     installAppHooks();
     hookGraph(app.graph);
     installDomBadgeObserver();
+    registerSidebarTab();
+
     setTimeout(() => {
       hookGraph(app.graph);
       scheduleDomBadgeSync();
-      void syncNow().catch((error) => console.warn("[PocketNAI] 初始同步失败", error));
     }, 900);
   },
 
   async afterConfigureGraph() {
     hookGraph(app.graph);
     scheduleDomBadgeSync();
-    scheduleSync(250);
+    if (sidebarRefreshHandler) {
+      void sidebarRefreshHandler();
+    }
   },
 
   getNodeMenuItems(node) {
