@@ -1394,8 +1394,13 @@ def register_routes():
                     await response.write(chunk)
             await response.write_eof()
             return response
-        except (ConnectionResetError, asyncio.CancelledError):
+        except (ConnectionResetError, asyncio.CancelledError, BrokenPipeError, ConnectionError):
             return response
+        except OSError as exc:
+            # 捕获 Windows 特有的客户端中途断开错误代码 (WinError 64 / 1236 / 10054)
+            if getattr(exc, "winerror", None) in (64, 1236, 10054):
+                return response
+            raise
 
     @_route("GET", "/api/loras")
     async def list_available_loras(request: web.Request):
