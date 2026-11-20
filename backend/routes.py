@@ -1394,7 +1394,12 @@ def register_routes():
                     await response.write(chunk)
             await response.write_eof()
             return response
-        except (ConnectionResetError, asyncio.CancelledError, BrokenPipeError, ConnectionError):
+        except (
+            ConnectionResetError,
+            asyncio.CancelledError,
+            BrokenPipeError,
+            ConnectionError,
+        ):
             return response
         except OSError as exc:
             # 捕获 Windows 特有的客户端中途断开错误代码 (WinError 64 / 1236 / 10054)
@@ -1662,7 +1667,11 @@ def register_routes():
 
         outputs = valid[2]
         server = PromptServer.instance
-        extra_data = {"client_id": client_id, "create_time": int(time.time() * 1000)}
+        extra_data = {
+            "client_id": client_id,
+            "create_time": int(time.time() * 1000),
+            "preview_method": "taesd",
+        }
         with _state_lock:
             number = server.number
             server.number += 1
